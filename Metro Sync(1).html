@@ -1,0 +1,1798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NYC Transit Hub Pro</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Babel Compiler for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Leaflet Map CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- ========================================== -->
+  <!-- 1. Firebase 初始化与模块引入 -->
+  <!-- ========================================== -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { 
+      getAuth, 
+      createUserWithEmailAndPassword, 
+      signInWithEmailAndPassword, 
+      signOut,
+      onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    // 已替换为你的真实 Firebase 配置
+    const firebaseConfig = {
+      apiKey: "AIzaSyCAAIj91mcz2TnBomOnko0CXYFgIWm6Q1Y",
+      authDomain: "positive-cacao-508920-a8.firebaseapp.com",
+      projectId: "positive-cacao-508920-a8",
+      storageBucket: "positive-cacao-508920-a8.firebasestorage.app",
+      messagingSenderId: "544161244055",
+      appId: "1:544161244055:web:56c55eb28a9b5254a31ad2",
+      measurementId: "G-VTEG6SK24E"
+    };
+
+    // 初始化 Firebase
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    
+    // 将 Firebase 实例和 API 挂载到 window 上，供 Babel 编译的 React 代码使用
+    window.firebaseAuth = auth;
+    window.firebaseAuthFuncs = {
+      createUserWithEmailAndPassword,
+      signInWithEmailAndPassword,
+      signOut,
+      onAuthStateChanged
+    };
+  </script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0f172a;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    /* 修复 Leaflet 地图在深色模式下的样式 */
+    .leaflet-container {
+      background-color: #1e293b;
+      font-family: inherit;
+      z-index: 10;
+    }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background-color: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #334155;
+    }
+    .leaflet-control-zoom a {
+      background-color: #1e293b !important;
+      color: #f8fafc !important;
+      border-color: #334155 !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // Helper component to safely render Lucide icons dynamically
+    const Icon = ({ name, className = "w-4 h-4", ...props }) => {
+      const containerRef = useRef(null);
+
+      useEffect(() => {
+        if (containerRef.current && window.lucide) {
+          containerRef.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+          window.lucide.createIcons({
+            nameAttr: 'data-lucide',
+            attrs: { class: className }
+          });
+        }
+      }, [name, className]);
+
+      return <span ref={containerRef} className="inline-flex items-center justify-center" {...props} />;
+    };
+
+    // Constants & Colors
+    const LINE_COLORS = {
+      '1': 'bg-red-600 text-white', '2': 'bg-red-600 text-white', '3': 'bg-red-600 text-white',
+      '4': 'bg-emerald-600 text-white', '5': 'bg-emerald-600 text-white', '6': 'bg-emerald-600 text-white',
+      'A': 'bg-blue-600 text-white', 'C': 'bg-blue-600 text-white', 'E': 'bg-blue-600 text-white',
+      'N': 'bg-amber-400 text-black font-bold', 'Q': 'bg-amber-400 text-black font-bold', 'R': 'bg-amber-400 text-black font-bold', 'W': 'bg-amber-400 text-black font-bold',
+      'B': 'bg-orange-500 text-white', 'D': 'bg-orange-500 text-white', 'F': 'bg-orange-500 text-white', 'M': 'bg-orange-500 text-white',
+      '7': 'bg-purple-600 text-white', 'L': 'bg-slate-400 text-white', 'G': 'bg-emerald-500 text-white', 'J': 'bg-amber-800 text-white', 'Z': 'bg-amber-800 text-white',
+      'S': 'bg-slate-600 text-white'
+    };
+
+    const HEX_LINE_COLORS = {
+      '1': '#dc2626', '2': '#dc2626', '3': '#dc2626',
+      '4': '#059669', '5': '#059669', '6': '#059669',
+      'A': '#2563eb', 'C': '#2563eb', 'E': '#2563eb',
+      'N': '#d97706', 'Q': '#d97706', 'R': '#d97706', 'W': '#d97706',
+      'B': '#f97316', 'D': '#f97316', 'F': '#f97316', 'M': '#f97316',
+      '7': '#9333ea', 'L': '#94a3b8', 'G': '#10b981', 'J': '#92400e', 'Z': '#92400e'
+    };
+
+    const LANDMARKS = [
+      { name: 'Times Square', stationId: 'TSQ', nameEs: 'Times Square', nameZh: '时代广场' },
+      { name: 'Grand Central', stationId: 'GCT', nameEs: 'Grand Central', nameZh: '中央车站' },
+      { name: 'World Trade Center', stationId: 'WTC', nameEs: 'Centro de Comercio Mundial', nameZh: '世界贸易中心' },
+      { name: 'Barclays Center', stationId: 'BARC', nameEs: 'Centro Barclays', nameZh: '巴克莱中心' },
+      { name: 'Penn Station', stationId: 'PENN', nameEs: 'Estación Penn', nameZh: '宾夕法尼亚车站' },
+      { name: 'Columbus Circle', stationId: 'CPS', nameEs: 'Central Park Sur', nameZh: '哥伦布圆环' }
+    ];
+
+    const STATIONS_DATA = {
+      // 59 St - Columbus Circle 对应 1号线的 125
+      'CPS': { id: 'CPS', mta_id: '125', name: '59 St - Columbus Circle', lines: ['1','A','B','C','D'], ada: true, x: 260, y: 110, borough: 'Manhattan' },
+      // Times Sq-42 St 对应 1/2/3号线的 127
+      'TSQ': { id: 'TSQ', mta_id: '127', name: 'Times Sq - 42 St', lines: ['1','2','3','7','N','Q','R','W','S'], ada: true, x: 270, y: 190, borough: 'Manhattan' },
+      // 34 St-Hudson Yards 对应 7号线的 726
+      'HUDSON': { id: 'HUDSON', mta_id: '726', name: '34 St - Hudson Yards', lines: ['7'], ada: true, x: 170, y: 230, borough: 'Manhattan' },
+      // 34 St-Penn Station 对应 1/2/3号线的 128
+      'PENN': { id: 'PENN', mta_id: '128', name: '34 St - Penn Station', lines: ['1','2','3','A','C','E'], ada: true, x: 240, y: 240, borough: 'Manhattan' },
+      // 34 St-Herald Sq 对应 B/D/F/M 的 D17
+      'HERALD': { id: 'HERALD', mta_id: 'D17', name: '34 St - Herald Sq', lines: ['B','D','F','M','N','Q','R','W'], ada: true, x: 300, y: 240, borough: 'Manhattan' },
+      // Grand Central-42 St 对应 4/5/6号线的 631
+      'GCT': { id: 'GCT', mta_id: '631', name: 'Grand Central - 42 St', lines: ['4','5','6','7','S'], ada: true, x: 380, y: 190, borough: 'Manhattan' },
+      // 14 St-Union Sq 对应 4/5/6号线的 635
+      'UNION': { id: 'UNION', mta_id: '635', name: '14 St - Union Sq', lines: ['4','5','6','L','N','Q','R','W'], ada: true, x: 310, y: 340, borough: 'Manhattan' },
+      // World Trade Center 对应 E 线的 E01
+      'WTC': { id: 'WTC', mta_id: 'E01', name: 'World Trade Center / Cortlandt', lines: ['1','E','N','R','W'], ada: true, x: 230, y: 460, borough: 'Manhattan' },
+      // Fulton St 对应 2/3号线的 229
+      'FULTON': { id: 'FULTON', mta_id: '229', name: 'Fulton St', lines: ['2','3','4','5','A','C','J','Z'], ada: true, x: 280, y: 460, borough: 'Manhattan' },
+      // Atlantic Av-Barclays Ctr 对应 2/3/4/5号线的 235
+      'BARC': { id: 'BARC', mta_id: '235', name: 'Atlantic Av - Barclays Ctr', lines: ['2','3','4','5','B','D','N','Q','R'], ada: true, x: 370, y: 550, borough: 'Brooklyn' }
+    };
+
+    // ================= 新增：路线规划的拓扑图数据 =================
+    // 模拟真实的站间行驶时间（分钟）和所属线路
+    const TRANSIT_GRAPH = {
+      'CPS': [{ to: 'TSQ', line: '1', time: 4 }, { to: 'TSQ', line: 'A', time: 5 }],
+      'TSQ': [{ to: 'CPS', line: '1', time: 4 }, { to: 'HUDSON', line: '7', time: 2 }, { to: 'GCT', line: '7', time: 5 }, { to: 'PENN', line: '1', time: 3 }, { to: 'HERALD', line: 'N', time: 6 }],
+      'HUDSON': [{ to: 'TSQ', line: '7', time: 2 }],
+      'PENN': [{ to: 'TSQ', line: '1', time: 3 }, { to: 'HERALD', line: 'B', time: 2 }, { to: 'WTC', line: 'A', time: 8 }],
+      'HERALD': [{ to: 'TSQ', line: 'N', time: 6 }, { to: 'PENN', line: 'B', time: 2 }, { to: 'UNION', line: 'N', time: 4 }],
+      'GCT': [{ to: 'TSQ', line: '7', time: 5 }, { to: 'UNION', line: '4', time: 6 }],
+      'UNION': [{ to: 'GCT', line: '4', time: 6 }, { to: 'HERALD', line: 'N', time: 4 }, { to: 'FULTON', line: '4', time: 10 }],
+      'WTC': [{ to: 'PENN', line: 'A', time: 8 }, { to: 'FULTON', line: 'A', time: 3 }],
+      'FULTON': [{ to: 'WTC', line: 'A', time: 3 }, { to: 'UNION', line: '4', time: 10 }, { to: 'BARC', line: '2', time: 12 }],
+      'BARC': [{ to: 'FULTON', line: '2', time: 12 }]
+    };
+
+    const SUBWAY_SEGMENTS = [
+      { id: 'seg1', line: '1', path: [[260, 110], [270, 190], [240, 240], [230, 460]] },
+      { id: 'seg2', line: '7', path: [[170, 230], [270, 190], [380, 190]] },
+      { id: 'seg3', line: 'N', path: [[260, 110], [270, 190], [300, 240], [310, 340], [230, 460], [370, 550]] },
+      { id: 'seg4', line: '4', path: [[380, 190], [310, 340], [280, 460], [370, 550]] },
+      { id: 'seg5', line: 'A', path: [[260, 110], [240, 240], [280, 460]] }
+    ];
+
+    const TRANSLATIONS = {
+      en: {
+        appTitle: "NYC Transit Hub Pro",
+        tagline: "Accessible Real-Time Wayfinding & GTFS Operations Engine",
+        viewMap: "Interactive Map & Dashboard",
+        viewSignUp: "Sign Up",
+        viewSignIn: "Sign In",
+        viewProfile: "User Profile & Settings",
+        personaHeader: "Active Rider Profile Filter",
+        personaCommuter: "Daily Commuter",
+        personaCommuterDesc: "Fastest express options, real-time countdowns & delay alerts",
+        personaWheelchair: "Wheelchair & Stroller",
+        personaWheelchairDesc: "Strict 100% ADA step-free paths & elevator outage live tracking",
+        personaTourist: "Tourist & Non-English",
+        personaTouristDesc: "Visual landmarks, simplified transfers & multilingual hub guides",
+        routePlannerTitle: "Multimodal NYC Route Finder",
+        originLabel: "Starting Station",
+        destinationLabel: "Destination Station",
+        quickLandmarks: "Popular NYC Destinations:",
+        routeFastest: "Option 1: Express Route",
+        routeAda: "Option 2: 100% Step-Free ADA Route",
+        routeMinimal: "Option 3: Minimum Transfers",
+        durationMinutes: "mins",
+        transfers: "transfer(s)",
+        liveArrivals: "Next Train Arrivals",
+        gtfsFeedTitle: "Live GTFS Subway Status Alerts",
+        equipmentOutageTitle: "Station Elevator & Escalator Monitor",
+        wayfindingTitle: "In-Station Hub Wayfinding Guide",
+        selectHub: "Select Hub for Step-by-Step Platform Navigation",
+        transferTime: "Avg. Platform Walk",
+        highContrastToggle: "WCAG High Contrast",
+        savedRoutesTitle: "Saved Favorite Routes",
+        saveRouteBtn: "Save Route",
+        noSavedRoutes: "No saved routes yet. Pin frequent trips for instant access.",
+        emergencyTitle: "MTA Assistance Hotline",
+        emergencyCall: "Call 511 / MTA Help Desk",
+        interactiveMapTitle: "Interactive NYC Transit Vector Map",
+        alternateMapTitle: "Text-Based Station Fallback List",
+        setAsOrigin: "Set as Origin",
+        setAsDest: "Set as Destination",
+        zoomIn: "Zoom In",
+        zoomOut: "Zoom Out",
+        resetView: "Reset View",
+        toggleLiveTrains: "Toggle Live Trains",
+        toggleAltMap: "Toggle Map / Text View",
+        
+        // Auth & Profile Translation Keys
+        signUpTitle: "Create Rider Account",
+        signInTitle: "Rider Sign-In",
+        signUpDesc: "Create an account to save favorite routes and enable live accessibility alerts.",
+        signInDesc: "Enter your rider credentials to sign into the hub.",
+        usernameLabel: "Username",
+        passwordLabel: "Password",
+        usernamePlaceholder: "e.g. nyc_commuter",
+        accountStatusLabel: "Account Status Toggle",
+        statusActive: "Active (Enabled)",
+        statusDisabled: "Disabled (Suspended)",
+        toggleStatusBtn: "Toggle Account Status",
+        signUpBtn: "Register Account",
+        signInBtn: "Sign In to Dashboard",
+        signOutBtn: "Sign Out",
+        welcomeBack: "Welcome back",
+        accountActiveMsg: "Your transit account is active and receiving live notifications.",
+        accountDisabledMsg: "Account is currently disabled. Enable status in settings to restore alerts.",
+        langPrefLabel: "Preferred System Language",
+        saveSettingsBtn: "Save Settings",
+        profileSavedMsg: "Profile preferences saved successfully!",
+        guestUser: "Guest",
+        
+        // Auth Messages
+        authCreating: "Creating account...",
+        authSigningIn: "Signing in...",
+        authSuccessSignUp: "Registration successful! Redirecting...",
+        authSuccessSignIn: "Signed in successfully! Redirecting...",
+        authErrEmailInUse: "This username/email is already registered.",
+        authErrWeakPass: "Password should be at least 6 characters.",
+        authErrInvalidEmail: "Invalid email format.",
+        authErrInvalidCred: "Invalid username or password.",
+        authErrTooMany: "Too many attempts. Please try again later.",
+        authErrGeneric: "Operation failed. Please try again."
+      },
+      es: {
+        appTitle: "NYC Transit Hub Pro (Español)",
+        tagline: "Navegación Accesible en Tiempo Real y Operaciones GTFS",
+        viewMap: "Mapa Interactivo y Panel",
+        viewSignUp: "Registrarse",
+        viewSignIn: "Iniciar Sesión",
+        viewProfile: "Perfil y Configuración",
+        personaHeader: "Perfil de Pasajero Activo",
+        personaCommuter: "Pasajero Diario",
+        personaCommuterDesc: "Opciones expresas más rápidas y alertas directas",
+        personaWheelchair: "Silla de Ruedas y Cochecito",
+        personaWheelchairDesc: "Rutas 100% libres de escalones y monitoreo de ascensores",
+        personaTourist: "Turista e Internacional",
+        personaTouristDesc: "Puntos de referencia visuales y guía multilingüe",
+        routePlannerTitle: "Buscador de Rutas Multimodal de NYC",
+        originLabel: "Estación de Origen",
+        destinationLabel: "Estación de Destino",
+        quickLandmarks: "Destinos Populares de NYC:",
+        routeFastest: "Opción 1: Expreso más Rápido",
+        routeAda: "Opción 2: Ruta 100% Accesible (ADA)",
+        routeMinimal: "Opción 3: Transbordos Mínimos",
+        durationMinutes: "min",
+        transfers: "transbordo(s)",
+        liveArrivals: "Próximas Llegadas de Tren",
+        gtfsFeedTitle: "Alertas del Metro GTFS en Vivo",
+        equipmentOutageTitle: "Monitoreo de Ascensores y Escaleras",
+        wayfindingTitle: "Guía de Transbordo Interno en Estaciones",
+        selectHub: "Seleccionar Estación para Guía de Transbordo",
+        transferTime: "Caminata promedio de plataforma",
+        highContrastToggle: "Alto Contraste WCAG",
+        savedRoutesTitle: "Rutas Guardadas",
+        saveRouteBtn: "Guardar Ruta",
+        noSavedRoutes: "No hay rutas guardadas.",
+        emergencyTitle: "Línea de Asistencia MTA",
+        emergencyCall: "Llamar 511 / Asistencia MTA",
+        interactiveMapTitle: "Mapa Vectorial Interactivo de Transito NYC",
+        alternateMapTitle: "Lista de Estaciones en Texto (Alternativo)",
+        setAsOrigin: "Establecer como Origen",
+        setAsDest: "Establecer como Destino",
+        zoomIn: "Acercar",
+        zoomOut: "Alejar",
+        resetView: "Restablecer Vista",
+        toggleLiveTrains: "Alternar Trenes en Vivo",
+        toggleAltMap: "Alternar Vista Texto/Mapa",
+        
+        signUpTitle: "Crear Cuenta de Pasajero",
+        signInTitle: "Iniciar Sesión de Pasajero",
+        signUpDesc: "Cree una cuenta para guardar rutas favoritas y habilitar alertas de accesibilidad.",
+        signInDesc: "Ingrese sus credenciales de pasajero para iniciar sesión.",
+        usernameLabel: "Nombre de Usuario",
+        passwordLabel: "Contraseña",
+        usernamePlaceholder: "ej. usuario_nyc",
+        accountStatusLabel: "Estado de la Cuenta",
+        statusActive: "Activo (Habilitado)",
+        statusDisabled: "Deshabilitado (Suspendido)",
+        toggleStatusBtn: "Alternar Estado",
+        signUpBtn: "Registrar Cuenta",
+        signInBtn: "Iniciar Sesión",
+        signOutBtn: "Cerrar Sesión",
+        welcomeBack: "Bienvenido de nuevo",
+        accountActiveMsg: "Su cuenta está activa y recibe notificaciones en vivo.",
+        accountDisabledMsg: "La cuenta está deshabilitada.",
+        langPrefLabel: "Idioma Preferido del Sistema",
+        saveSettingsBtn: "Guardar Configuración",
+        profileSavedMsg: "¡Preferencias de perfil guardadas con éxito!",
+        guestUser: "Invitado",
+        
+        authCreating: "Creando cuenta...",
+        authSigningIn: "Iniciando sesión...",
+        authSuccessSignUp: "¡Registro exitoso! Redirigiendo...",
+        authSuccessSignIn: "¡Sesión iniciada! Redirigiendo...",
+        authErrEmailInUse: "Este usuario/correo ya está registrado.",
+        authErrWeakPass: "La contraseña debe tener al menos 6 caracteres.",
+        authErrInvalidEmail: "Formato de correo inválido.",
+        authErrInvalidCred: "Usuario o contraseña inválidos.",
+        authErrTooMany: "Demasiados intentos. Inténtelo más tarde.",
+        authErrGeneric: "Operación fallida. Inténtelo de nuevo."
+      },
+      zh: {
+        appTitle: "纽约交通枢纽 Pro (NYC Transit Hub)",
+        tagline: "实时无障碍导航与 GTFS 列车运营系统",
+        viewMap: "互动地图与实时仪表板",
+        viewSignUp: "注册新账号",
+        viewSignIn: "登录账号",
+        viewProfile: "用户资料与设置",
+        personaHeader: "乘客模式选择",
+        personaCommuter: "日常通勤者",
+        personaCommuterDesc: "快车选项、实时到站倒计时与延误警告",
+        personaWheelchair: "轮椅与婴儿车使用者",
+        personaWheelchairDesc: "100% 无阶梯路线与电梯实时状态监控",
+        personaTourist: "观光客与非英语乘客",
+        personaTouristDesc: "提供地标图示、简化换乘与多语言枢纽指南",
+        routePlannerTitle: "纽约多模态路线规划器",
+        originLabel: "出发车站",
+        destinationLabel: "到达车站",
+        quickLandmarks: "热门纽约地标:",
+        routeFastest: "方案 1: 最快特快列车",
+        routeAda: "方案 2: 100% 无阶梯无障碍路线",
+        routeMinimal: "方案 3: 最少换乘路线",
+        durationMinutes: "分钟",
+        transfers: "次换乘",
+        liveArrivals: "实时到站倒计时",
+        gtfsFeedTitle: "实时地铁 GTFS 运行状态",
+        equipmentOutageTitle: "车站电梯与电扶梯故障监控",
+        wayfindingTitle: "大型枢纽站内换乘与指引",
+        selectHub: "选择枢纽车站查看站内换乘图解",
+        transferTime: "平均月台步行时间",
+        highContrastToggle: "WCAG 高对比模式",
+        savedRoutesTitle: "已保存的常用路线",
+        saveRouteBtn: "保存此路线",
+        noSavedRoutes: "尚无保存的路线。",
+        emergencyTitle: "MTA 热线求助",
+        emergencyCall: "拨打 511 / MTA 热线",
+        interactiveMapTitle: "纽约地铁互动式矢量地图",
+        alternateMapTitle: "文本式车站备用列表",
+        setAsOrigin: "设为出发站",
+        setAsDest: "设为到达站",
+        zoomIn: "放大",
+        zoomOut: "缩小",
+        resetView: "重置视角",
+        toggleLiveTrains: "开关动态列车",
+        toggleAltMap: "切换地图/文本视图",
+        
+        signUpTitle: "创建乘客账号",
+        signInTitle: "乘客登录",
+        signUpDesc: "创建账号以保存常用路线并开启实时无障碍警报。",
+        signInDesc: "输入您的乘客凭证以登录交通枢纽。",
+        usernameLabel: "用户名",
+        passwordLabel: "密码",
+        usernamePlaceholder: "例如: nyc_commuter",
+        accountStatusLabel: "账号状态切换",
+        statusActive: "正常 (启用)",
+        statusDisabled: "已禁用 (暂停)",
+        toggleStatusBtn: "切换账号状态",
+        signUpBtn: "注册账号",
+        signInBtn: "登录系统",
+        signOutBtn: "退出登录",
+        welcomeBack: "欢迎回来",
+        accountActiveMsg: "您的账号处于激活状态，正在接收实时交通提醒。",
+        accountDisabledMsg: "您的账号已被禁用。请在设置中启用以恢复提醒服务。",
+        langPrefLabel: "首选系统语言",
+        saveSettingsBtn: "保存设置",
+        profileSavedMsg: "个人资料设置已成功保存！",
+        guestUser: "访客",
+        
+        authCreating: "正在创建账号...",
+        authSigningIn: "正在登录...",
+        authSuccessSignUp: "注册成功！正在跳转...",
+        authSuccessSignIn: "登录成功！正在跳转...",
+        authErrEmailInUse: "该用户名/邮箱已被注册！",
+        authErrWeakPass: "密码太弱，至少需要 6 位字符！",
+        authErrInvalidEmail: "邮箱/用户名格式不正确！",
+        authErrInvalidCred: "账号或密码错误！",
+        authErrTooMany: "尝试次数过多，请稍后再试。",
+        authErrGeneric: "操作失败，请重试。"
+      }
+    };
+
+    const WAYFINDING_HUBS = [
+      {
+        id: 'TSQ',
+        name: 'Times Sq - 42 St / Port Authority Hub',
+        steps: [
+          { textEn: "Exit N/Q/R/W platform via elevator E201 to Mezzanine level.", textEs: "Salga de la plataforma N/Q/R/W por el ascensor E201 al nivel Mezzanine.", textZh: "搭乘 E201 电梯从 N/Q/R/W 月台前往大厅层。", isAda: true },
+          { textEn: "Follow yellow signage through step-free passageway toward 7 Train.", textEs: "Siga las señales amarillas por el pasaje sin escalones hacia el tren 7.", textZh: "沿黄色无障碍指示牌步行至 7 号线通道。", isAda: true },
+          { textEn: "Take Elevator E209 down directly to Flushing-bound 7 platform.", textEs: "Tome el ascensor E209 para bajar a la plataforma del tren 7.", textZh: "搭乘 E209 电梯直达 7 号线往法拉盛方向月台。", isAda: true }
+        ],
+        avoidStairsNotice: "Avoid Central Corridor Ramp (Stairs only, broken lift near 8th Ave).",
+        transferWalkMinutes: 4
+      },
+      {
+        id: 'FULTON',
+        name: 'Fulton Street Transit Center',
+        steps: [
+          { textEn: "From A/C platform, take glass elevator at center platform up to Dey St Concourse.", textEs: "Desde la plataforma A/C, tome el ascensor de vidrio hacia el vestíbulo de Dey St.", textZh: "从 A/C 月台中央搭乘玻璃电梯前往 Dey St 穿堂。", isAda: true },
+          { textEn: "Use wide step-free ramp connecting to 2/3/4/5 lines.", textEs: "Use la rampa amplia sin escalones que conecta con las líneas 2/3/4/5.", textZh: "使用宽敞无障碍坡道通往 2/3/4/5 号线。", isAda: true },
+          { textEn: "Elevator E312 provides direct access to Brooklyn-bound 4/5 platform.", textEs: "El ascensor E312 brinda acceso directo a la plataforma 4/5 hacia Brooklyn.", textZh: "搭乘 E312 电梯直达往布鲁克林方向 4/5 号线月台。", isAda: true }
+        ],
+        avoidStairsNotice: "Escalator ES104 undergoing maintenance; use adjacent Elevator E312.",
+        transferWalkMinutes: 3
+      },
+      {
+        id: 'BARC',
+        name: 'Atlantic Av - Barclays Ctr',
+        steps: [
+          { textEn: "Arrive on B/Q platform; head to northern platform end for main ADA Elevator EL-4.", textEs: "Llegue a la plataforma B/Q; diríjasе al extremo norte para el ascensor principal EL-4.", textZh: "抵达 B/Q 月台后，前往月台北侧搭乘主电梯 EL-4。", isAda: true },
+          { textEn: "Transfer to 2/3/4/5 concourse via the fully accessible corridor.", textEs: "Transfiera al vestíbulo 2/3/4/5 a través del corredor totalmente accesible.", textZh: "经由全无障碍连通道换乘至 2/3/4/5 号线大厅。", isAda: true },
+          { textEn: "Take Elevator EL-1 directly to LIRR train hall if connecting to regional rail.", textEs: "Tome el ascensor EL-1 directamente al vestíbulo de LIRR si conecta con el tren regional.", textZh: "若需换乘长岛铁路 LIRR，请搭乘 EL-1 电梯直达铁路大厅。", isAda: true }
+        ],
+        avoidStairsNotice: "Passageway near Pacific St entrance has 6 steps without ramp.",
+        transferWalkMinutes: 5
+      }
+    ];
+
+    // ================= 新增：Dijkstra 算法实现 =================
+    class PriorityQueue {
+      constructor() { this.values = []; }
+      enqueue(val, priority) {
+        this.values.push({ val, priority });
+        this.sort();
+      }
+      dequeue() { return this.values.shift(); }
+      sort() { this.values.sort((a, b) => a.priority - b.priority); }
+      isEmpty() { return this.values.length === 0; }
+    }
+
+    const findShortestPath = (graph, startNode, endNode) => {
+      const distances = {};
+      const previous = {};
+      const pq = new PriorityQueue();
+      
+      Object.keys(graph).forEach(node => {
+        distances[node] = node === startNode ? 0 : Infinity;
+        previous[node] = null;
+      });
+      pq.enqueue(startNode, 0);
+
+      while (!pq.isEmpty()) {
+        const { val: current } = pq.dequeue();
+        if (current === endNode) break;
+
+        const neighbors = graph[current] || [];
+        neighbors.forEach(neighbor => {
+          const time = distances[current] + neighbor.time;
+          if (time < distances[neighbor.to]) {
+            distances[neighbor.to] = time;
+            previous[neighbor.to] = { station: current, time: neighbor.time, line: neighbor.line };
+            pq.enqueue(neighbor.to, time);
+          }
+        });
+      }
+
+      if (distances[endNode] === Infinity) return null;
+      
+      const path = [];
+      let curr = endNode;
+      while (curr !== startNode) {
+        if (!previous[curr]) break;
+        path.unshift({ station: curr, ...previous[curr] });
+        curr = previous[curr].station;
+      }
+      return { totalTime: distances[endNode], path };
+    };
+
+
+    function App() {
+      const [currentView, setCurrentView] = useState('map');
+      
+      const [lang, setLang] = useState('en'); 
+      const [highContrast, setHighContrast] = useState(false);
+      const [activePersona, setActivePersona] = useState('wheelchair'); 
+      const [useAltMap, setUseAltMap] = useState(false);
+      
+      const [currentUser, setCurrentUser] = useState({
+        username: TRANSLATIONS['en'].guestUser,
+        status: 'ENABLE',
+        uid: null
+      });
+      
+      const [formUsername, setFormUsername] = useState('');
+      const [formPassword, setFormPassword] = useState('');
+      const [formStatus, setFormStatus] = useState('ENABLE');
+      const [authMessage, setAuthMessage] = useState({ type: '', text: '' });
+
+      const [origin, setOrigin] = useState('TSQ');
+      const [destination, setDestination] = useState('BARC');
+      const [selectedRouteOption, setSelectedRouteOption] = useState(1);
+      const [routeResults, setRouteResults] = useState(null);
+
+      const [mapScale, setMapScale] = useState(1);
+      const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
+      const [isDragging, setIsDragging] = useState(false);
+      const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+      const [selectedMapStation, setSelectedMapStation] = useState(null);
+      const [showLiveTrains, setShowLiveTrains] = useState(true);
+      const [trainPositions, setTrainPositions] = useState([
+        { id: 'train1', line: '1', progress: 0.2, speed: 0.005, segment: 'seg1' },
+        { id: 'train2', line: '7', progress: 0.6, speed: 0.007, segment: 'seg2' },
+        { id: 'train3', line: 'N', progress: 0.4, speed: 0.004, segment: 'seg3' },
+        { id: 'train4', line: '4', progress: 0.8, speed: 0.006, segment: 'seg4' }
+      ]);
+
+      const [refreshCountdown, setRefreshCountdown] = useState(15);
+      const [isRefreshing, setIsRefreshing] = useState(false);
+      const [gtfsAlerts, setGtfsAlerts] = useState([
+        { id: '1', line: 'N', severity: 'warning', message: 'N trains running local between 59 St and 34 St-Herald Sq due to signal maintenance.', lineBg: LINE_COLORS['N'] },
+        { id: '2', line: '7', severity: 'info', message: '7 train express service active toward Manhattan until 12:00 PM.', lineBg: LINE_COLORS['7'] },
+        { id: '3', line: 'A', severity: 'danger', message: 'A trains running with delays following a track inspection at Fulton St.', lineBg: LINE_COLORS['A'] },
+        { id: '4', line: '2', severity: 'warning', message: '2/3 train platform crowded at Times Square due to earlier equipment check.', lineBg: LINE_COLORS['2'] },
+        { id: '5', line: '4', severity: 'info', message: '4/5 express service running smoothly on Lexington Ave Line.', lineBg: LINE_COLORS['4'] }
+      ]);
+
+      const [equipmentOutages, setEquipmentOutages] = useState([
+        { id: 'EQ-101', stationId: 'TSQ', stationName: 'Times Sq - 42 St', equipment: 'Elevator E201 (N/Q/R Mezzanine)', status: 'OUT_OF_SERVICE', eta: 'Today 16:30', workaround: 'Use Elevator E209 via 7 Line Concourse.' },
+        { id: 'EQ-204', stationId: 'GCT', stationName: 'Grand Central - 42 St', equipment: 'Escalator ES402 (Lexington Ave Line)', status: 'OUT_OF_SERVICE', eta: 'Tomorrow 09:00', workaround: 'Use step-free ramp at 42nd St Passage.' },
+        { id: 'EQ-308', stationId: 'PENN', stationName: '34 St - Penn Station', equipment: 'Elevator E104 (7th Ave Entrance)', status: 'OPERATIONAL', eta: 'N/A', workaround: 'Fully operational.' },
+        { id: 'EQ-412', stationId: 'FULTON', stationName: 'Fulton St', equipment: 'Elevator E302 (Fulton St to Platform 4/5)', status: 'OUT_OF_SERVICE', eta: 'Today 18:00', workaround: 'Use Dey St Passageway Elevator E312.' }
+      ]);
+
+      const [liveArrivals, setLiveArrivals] = useState([
+        { line: '1', destination: 'Uptown & The Bronx', minutes: 2, status: 'On Time' },
+        { line: '2', destination: 'Flatbush Av - Brooklyn', minutes: 5, status: 'On Time' },
+        { line: 'N', destination: 'Coney Island', minutes: 7, status: 'Delayed 2m' },
+        { line: '7', destination: 'Flushing - Main St', minutes: 1, status: 'Approaching' }
+      ]);
+
+      const [selectedHubId, setSelectedHubId] = useState('TSQ');
+      const [savedRoutes, setSavedRoutes] = useState([]);
+      const [filterLine, setFilterLine] = useState('ALL');
+
+      // 👇 ================= 添加这段代码 ================= 👇
+      // 真实路网图的 State
+      const [transitGraph, setTransitGraph] = useState(null);
+
+      // 加载 full_graph.json
+      useEffect(() => {
+        fetch('./full_graph.json')
+          .then(res => res.json())
+          .then(data => {
+            console.log("✅ Real GTFS network successfully loaded!");
+            setTransitGraph(data);
+          })
+          .catch(err => console.error("❌ Loading failed.Please make sure you used Live Server and the file exists:", err));
+      }, []);
+      // 👆 ================= 添加这段代码 ================= 👆
+      
+      // ================= 真实地图相关 State =================
+      const mapContainerRef = useRef(null);
+
+      // ================= 真实地图相关 State =================
+      const mapContainerRef = useRef(null);
+      const mapInstanceRef = useRef(null);
+      const [geoData, setGeoData] = useState({ lines: null, stations: null });
+      const [mapLoading, setMapLoading] = useState(true);
+
+      const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+
+      // 监听 Firebase 的登录状态变化
+      useEffect(() => {
+        if (window.firebaseAuth) {
+          const unsubscribe = window.firebaseAuthFuncs.onAuthStateChanged(window.firebaseAuth, (user) => {
+            if (user) {
+              setCurrentUser(prev => ({
+                ...prev,
+                username: user.email.split('@')[0], // 提取 @ 前面的部分作为用户名
+                uid: user.uid
+              }));
+            } else {
+              setCurrentUser({ username: t.guestUser, status: 'ENABLE', uid: null });
+            }
+          });
+          return () => unsubscribe();
+        }
+      }, [t.guestUser]);
+
+      // ================= 1. 加载 MTA 官方 GeoJSON 数据 =================
+      useEffect(() => {
+        if (currentView !== 'map' || geoData.lines) return; 
+        
+        const fetchGeoJSON = async () => {
+          try {
+            setMapLoading(true);
+            const [linesRes, stationsRes] = await Promise.all([
+              fetch('https://data.ny.gov/resource/s692-irgq.geojson'),
+              fetch('https://data.ny.gov/resource/39hk-dx4f.geojson')
+            ]);
+            if (!linesRes.ok || !stationsRes.ok) throw new Error("API limit reached or server error");
+            
+            const lines = await linesRes.json();
+            const stations = await stationsRes.json();
+            setGeoData({ lines, stations });
+          } catch (error) {
+            console.error("Failed to load MTA Map Data:", error);
+          } finally {
+            setMapLoading(false);
+          }
+        };
+        fetchGeoJSON();
+      }, [currentView, geoData.lines]);
+
+      // ================= 2. 初始化 Leaflet 地图 =================
+      useEffect(() => {
+        if (currentView !== 'map' || useAltMap) return;
+        if (!mapContainerRef.current || !geoData.lines || !geoData.stations) return;
+
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.remove();
+        }
+
+        const map = L.map(mapContainerRef.current, {
+          zoomControl: true,
+          scrollWheelZoom: true
+        }).setView([40.730, -73.980], 11);
+        
+        mapInstanceRef.current = map;
+
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 19,
+          attribution: 'Tiles © Esri'
+        }).addTo(map);
+
+        L.geoJSON(geoData.lines, {
+          style: (feature) => {
+            const routeId = feature.properties.route_id;
+            return { color: HEX_LINE_COLORS[routeId] || '#808080', weight: 4, opacity: 0.8 };
+          }
+        }).addTo(map);
+
+        L.geoJSON(geoData.stations, {
+          pointToLayer: (feature, latlng) => {
+            return L.circleMarker(latlng, {
+              radius: 5, fillColor: '#ffffff', color: '#0f172a', weight: 2, opacity: 1, fillOpacity: 1
+            });
+          },
+          onEachFeature: (feature, layer) => {
+            const props = feature.properties;
+            const isAda = props.ada === '1' || props.ada === 'true' || props.ada === true;
+            
+            layer.bindPopup(`
+              <div style="font-family: inherit; font-size: 13px; padding: 4px;">
+                <b style="display:block; margin-bottom:4px;">${props.name || 'Unknown Station'}</b>
+                <span style="color: #94a3b8; font-size: 11px;">Lines: ${props.line || 'N/A'}</span><br/>
+                <span style="color: ${isAda ? '#34d399' : '#94a3b8'}; font-size: 11px; display:block; margin-top:4px;">
+                  ${isAda ? '♿ Accessible' : '🚶 Stairs Only'}
+                </span>
+                <div style="margin-top: 10px; display: flex; gap: 6px;">
+                  <button onclick="window.setMapOrigin('${props.name}')" style="flex:1; padding: 6px; background:#2563eb; color:#fff; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Set Origin</button>
+                  <button onclick="window.setMapDest('${props.name}')" style="flex:1; padding: 6px; background:#059669; color:#fff; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Set Dest</button>
+                </div>
+              </div>
+            `);
+          }
+        }).addTo(map);
+
+        const resizeObserver = new ResizeObserver(() => {
+          map.invalidateSize();
+        });
+        resizeObserver.observe(mapContainerRef.current);
+
+        return () => {
+          resizeObserver.disconnect();
+          map.remove();
+          mapInstanceRef.current = null;
+        };
+      }, [geoData, useAltMap, currentView]);
+
+      // 绑定全局函数以便 Leaflet Popup 调用
+      useEffect(() => {
+        // 智能模糊匹配函数：解决官方数据和本地数据站名格式不一致的问题
+        const findStation = (stationName) => {
+          if (!stationName) return null;
+          const cleanName = stationName.toLowerCase().replace(/[^a-z0-9]/g, ''); // 移除空格和标点
+          
+          return Object.values(STATIONS_DATA).find(s => {
+            const shortName = s.name.split(' - ')[0].toLowerCase().replace(/[^a-z0-9]/g, ''); // 移除空格和标点
+            return cleanName.includes(shortName) || shortName.includes(cleanName);
+          });
+        };
+
+        window.setMapOrigin = (stationName) => {
+          const matched = findStation(stationName);
+          if (matched) {
+            setOrigin(matched.id);
+          } else {
+            alert(`"${stationName}" 未包含在左侧的演示菜单中，请在左侧下拉菜单手动选择。`);
+          }
+        };
+        
+        window.setMapDest = (stationName) => {
+          const matched = findStation(stationName);
+          if (matched) {
+            setDestination(matched.id);
+          } else {
+            alert(`"${stationName}" 未包含在左侧的演示菜单中，请在左侧下拉菜单手动选择。`);
+          }
+        };
+      }, []);
+
+      // Countdown Timer for Live Refreshes
+      useEffect(() => {
+        const timer = setInterval(() => {
+          setRefreshCountdown((prev) => {
+            if (prev <= 1) {
+              triggerGtfsRefresh();
+              return 15;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+
+        return () => clearInterval(timer);
+      }, []);
+
+      // Live Train Motion Loop
+      useEffect(() => {
+        if (!showLiveTrains) return;
+
+        const animTimer = setInterval(() => {
+          setTrainPositions((prevTrains) =>
+            prevTrains.map((tr) => {
+              let nextProg = tr.progress + tr.speed;
+              if (nextProg > 1) nextProg = 0;
+              return { ...tr, progress: nextProg };
+            })
+          );
+        }, 100);
+
+        return () => clearInterval(animTimer);
+      }, [showLiveTrains]);
+
+      const triggerGtfsRefresh = () => {
+        setIsRefreshing(true);
+        setTimeout(() => {
+          const updatedOutages = [...equipmentOutages];
+          if (Math.random() > 0.5) {
+            updatedOutages[0].eta = 'Updated: Today 17:15';
+          }
+          setEquipmentOutages(updatedOutages);
+
+          setLiveArrivals([
+            { line: '1', destination: 'Uptown & The Bronx', minutes: Math.floor(Math.random() * 3) + 1, status: 'On Time' },
+            { line: '2', destination: 'Flatbush Av - Brooklyn', minutes: Math.floor(Math.random() * 6) + 2, status: 'On Time' },
+            { line: 'N', destination: 'Coney Island', minutes: Math.floor(Math.random() * 8) + 4, status: 'Delayed 1m' },
+            { line: '7', destination: 'Flushing - Main St', minutes: Math.floor(Math.random() * 2) + 1, status: 'Approaching' }
+          ]);
+
+          setIsRefreshing(false);
+        }, 600);
+      };
+
+      const handlePersonaChange = (p) => {
+        setActivePersona(p);
+        if (p === 'wheelchair') {
+          setSelectedRouteOption(1);
+        } else if (p === 'commuter') {
+          setSelectedRouteOption(0);
+        } else if (p === 'tourist') {
+          setSelectedRouteOption(2);
+          setLang('es');
+        }
+      };
+
+      const calculateRoutes = () => {
+        if (origin === destination) {
+          setRouteResults([]);
+          return;
+        }
+
+        let result = null;
+        let usedLines = ['1']; 
+        let steps = [];
+
+        // 1. 优先使用全网真实数据
+        if (transitGraph) {
+          const startMtaId = STATIONS_DATA[origin].mta_id;
+          const endMtaId = STATIONS_DATA[destination].mta_id;
+          
+          if (startMtaId && endMtaId) {
+            result = findShortestPath(transitGraph, startMtaId, endMtaId);
+            
+            if (result && result.path.length > 0) {
+              // 将真实的 MTA ID 映射回好看的名称
+              // 注意：由于目前只存了 10 个站点的名字，其他中转站只能用 ID 表示
+              const getStationName = (id) => {
+                const found = Object.values(STATIONS_DATA).find(s => s.mta_id === id);
+                return found ? found.name : `Station ${id}`;
+              };
+
+              steps = result.path.map((step, index) => {
+                const fromId = index === 0 ? startMtaId : result.path[index - 1].station;
+                const fromName = getStationName(fromId);
+                const toId = step.station;
+                const toName = getStationName(toId);
+                return `Ride from ${fromName} to ${toName} (${Math.round(step.time / 60)} mins)`;
+              });
+              usedLines = ['GTFS']; // 统一图标
+            }
+          }
+        } 
+        
+        // 2. 降级方案：如果没加载出 JSON，用原来的 10 站图
+        if (!result) {
+          result = findShortestPath(TRANSIT_GRAPH, origin, destination);
+          if (result) {
+            usedLines = [...new Set(result.path.map(p => p.line))];
+            steps = result.path.map((step, index) => {
+              const fromName = STATIONS_DATA[step.station].name;
+              const toName = index === result.path.length - 1 ? STATIONS_DATA[destination].name : STATIONS_DATA[result.path[index + 1].station].name;
+              return `Take ${step.line} train from ${fromName} to ${toName} (${step.time} mins)`;
+            });
+          }
+        }
+
+        if (!result) {
+          setRouteResults([]);
+          return;
+        }
+
+        // 更新 UI
+        setRouteResults([{
+          id: 0,
+          title: transitGraph ? "Real GTFS Network Route" : "Fastest Route (Dijkstra)",
+          duration: Math.round(result.totalTime / 60),
+          transfers: usedLines.length > 1 ? usedLines.length - 1 : 0,
+          isAda: false, 
+          lines: usedLines,
+          steps: steps.slice(0, 8)
+        }]);
+      };
+
+
+      useEffect(() => {
+        calculateRoutes();
+      }, [origin, destination, lang, transitGraph]);
+
+      const saveCurrentRoute = (route) => {
+        const newSaved = {
+          id: `${origin}_TO_${destination}_OPT${route.id}_${Date.now()}`,
+          originName: STATIONS_DATA[origin].name,
+          destName: STATIONS_DATA[destination].name,
+          duration: route.duration,
+          lines: route.lines,
+          isAda: route.isAda
+        };
+        setSavedRoutes(prev => [newSaved, ...prev]);
+      };
+
+      const removeSavedRoute = (id) => {
+        setSavedRoutes(prev => prev.filter(r => r.id !== id));
+      };
+
+      // ==========================================
+      // Auth Action Handlers (Connected to Firebase & Localized)
+      // ==========================================
+      const handleSignUpSubmit = async (e) => {
+        e.preventDefault();
+        if (!formUsername || !formPassword) return;
+        
+        setAuthMessage({ type: 'info', text: t.authCreating });
+        
+        try {
+          const emailToRegister = formUsername.includes('@') ? formUsername : `${formUsername}@metrosync.app`;
+          
+          await window.firebaseAuthFuncs.createUserWithEmailAndPassword(
+            window.firebaseAuth, 
+            emailToRegister, 
+            formPassword
+          );
+          
+          setAuthMessage({ type: 'success', text: t.authSuccessSignUp });
+          setTimeout(() => {
+            setAuthMessage({ type: '', text: '' });
+            setCurrentView('map');
+          }, 1500);
+          
+        } catch (error) {
+          console.error("Sign up error:", error);
+          let errorMsg = t.authErrGeneric;
+          if (error.code === 'auth/email-already-in-use') errorMsg = t.authErrEmailInUse;
+          if (error.code === 'auth/weak-password') errorMsg = t.authErrWeakPass;
+          if (error.code === 'auth/invalid-email') errorMsg = t.authErrInvalidEmail;
+          setAuthMessage({ type: 'error', text: errorMsg });
+        }
+      };
+
+      const handleSignInSubmit = async (e) => {
+        e.preventDefault();
+        if (!formUsername || !formPassword) return;
+        
+        setAuthMessage({ type: 'info', text: t.authSigningIn });
+        
+        try {
+          const emailToLogin = formUsername.includes('@') ? formUsername : `${formUsername}@metrosync.app`;
+          
+          await window.firebaseAuthFuncs.signInWithEmailAndPassword(
+            window.firebaseAuth, 
+            emailToLogin, 
+            formPassword
+          );
+          
+          setAuthMessage({ type: 'success', text: t.authSuccessSignIn });
+          setTimeout(() => {
+            setAuthMessage({ type: '', text: '' });
+            setCurrentView('map');
+          }, 1500);
+
+        } catch (error) {
+          console.error("Sign in error:", error);
+          let errorMsg = t.authErrInvalidCred;
+          if (error.code === 'auth/too-many-requests') errorMsg = t.authErrTooMany;
+          setAuthMessage({ type: 'error', text: errorMsg });
+        }
+      };
+
+      const handleSignOut = async () => {
+        try {
+          await window.firebaseAuthFuncs.signOut(window.firebaseAuth);
+          setCurrentView('signIn');
+          setFormUsername('');
+          setFormPassword('');
+        } catch (error) {
+          console.error("Sign out error:", error);
+        }
+      };
+
+      const handleProfileUpdate = (e) => {
+        e.preventDefault();
+        setAuthMessage({ type: 'success', text: t.profileSavedMsg });
+        setTimeout(() => setAuthMessage({ type: '', text: '' }), 2000);
+      };
+
+      const filteredAlerts = useMemo(() => {
+        if (filterLine === 'ALL') return gtfsAlerts;
+        return gtfsAlerts.filter(a => a.line === filterLine);
+      }, [gtfsAlerts, filterLine]);
+
+      const activeHubData = WAYFINDING_HUBS.find(h => h.id === selectedHubId) || WAYFINDING_HUBS[0];
+
+      const handleMouseDown = (e) => {
+        setIsDragging(true);
+        setDragStart({ x: e.clientX - mapOffset.x, y: e.clientY - mapOffset.y });
+      };
+
+      const handleMouseMove = (e) => {
+        if (!isDragging) return;
+        setMapOffset({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
+      };
+
+      const handleMouseUp = () => {
+        setIsDragging(false);
+      };
+
+      const getInterpolatedTrainPos = (segmentId, progress) => {
+        const seg = SUBWAY_SEGMENTS.find(s => s.id === segmentId);
+        if (!seg || seg.path.length < 2) return { x: 0, y: 0 };
+        
+        const totalSegments = seg.path.length - 1;
+        const scaledProg = progress * totalSegments;
+        const index = Math.min(Math.floor(scaledProg), totalSegments - 1);
+        const subProg = scaledProg - index;
+
+        const p1 = seg.path[index];
+        const p2 = seg.path[index + 1];
+
+        return {
+          x: p1[0] + (p2[0] - p1[0]) * subProg,
+          y: p1[1] + (p2[1] - p1[1]) * subProg
+        };
+      };
+
+      return (
+        <div className={`min-h-screen transition-colors duration-200 ${highContrast ? 'bg-black text-yellow-300 font-mono' : 'bg-slate-900 text-slate-100 font-sans'}`}>
+          
+          {/* Header Navigation with View Switcher */}
+          <header className={`border-b ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/90'} backdrop-blur sticky top-0 z-50`}>
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center space-x-3">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black text-xl shadow-md ${highContrast ? 'bg-yellow-400 text-black' : 'bg-blue-600 text-white'}`}>
+                  MTA
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
+                    {t.appTitle}
+                    <span className="text-xs px-2 py-0.5 rounded font-mono uppercase bg-blue-500/20 text-blue-400 border border-blue-500/30">GTFS Interactive</span>
+                  </h1>
+                  <p className="text-xs opacity-75">{t.tagline}</p>
+                </div>
+              </div>
+
+              {/* View Navigation Tabs */}
+              <nav className="flex items-center space-x-1 border rounded-lg p-1 border-slate-700 bg-slate-900/80">
+                <button
+                  onClick={() => setCurrentView('map')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                    currentView === 'map' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Icon name="map" className="w-3.5 h-3.5" />
+                  {t.viewMap}
+                </button>
+                <button
+                  onClick={() => setCurrentView('signUp')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                    currentView === 'signUp' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Icon name="user-plus" className="w-3.5 h-3.5" />
+                  {t.viewSignUp}
+                </button>
+                <button
+                  onClick={() => setCurrentView('signIn')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                    currentView === 'signIn' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Icon name="log-in" className="w-3.5 h-3.5" />
+                  {t.viewSignIn}
+                </button>
+                <button
+                  onClick={() => setCurrentView('profile')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition ${
+                    currentView === 'profile' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Icon name="user" className="w-3.5 h-3.5" />
+                  {t.viewProfile}
+                </button>
+              </nav>
+
+              {/* Utility Tools */}
+              <div className="flex items-center space-x-3 text-sm">
+                <button 
+                  onClick={triggerGtfsRefresh} 
+                  className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg border text-xs font-mono transition ${
+                    highContrast ? 'border-yellow-400 hover:bg-yellow-400 hover:text-black' : 'border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300'
+                  }`}
+                >
+                  <Icon name="refresh-cw" className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
+                  <span>{refreshCountdown}s</span>
+                </button>
+
+                <div className="flex items-center space-x-1 border rounded-lg p-1 border-slate-700 bg-slate-800/50">
+                  <Icon name="globe" className="w-4 h-4 ml-1 opacity-60" />
+                  <button onClick={() => setLang('en')} className={`px-2 py-0.5 rounded text-xs font-medium ${lang === 'en' ? 'bg-blue-600 text-white' : 'opacity-70 hover:opacity-100'}`}>EN</button>
+                  <button onClick={() => setLang('es')} className={`px-2 py-0.5 rounded text-xs font-medium ${lang === 'es' ? 'bg-blue-600 text-white' : 'opacity-70 hover:opacity-100'}`}>ES</button>
+                  <button onClick={() => setLang('zh')} className={`px-2 py-0.5 rounded text-xs font-medium ${lang === 'zh' ? 'bg-blue-600 text-white' : 'opacity-70 hover:opacity-100'}`}>简体</button>
+                </div>
+
+                <button
+                  onClick={() => setHighContrast(!highContrast)}
+                  className={`p-2 rounded-lg border transition ${
+                    highContrast ? 'bg-yellow-400 text-black border-yellow-300 font-bold' : 'border-slate-700 bg-slate-800 text-slate-300 hover:text-white'
+                  }`}
+                  title={t.highContrastToggle}
+                >
+                  <Icon name={highContrast ? "sun" : "moon"} className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+            {/* VIEW 1: SIGN-UP PAGE */}
+            {currentView === 'signUp' && (
+              <div className="max-w-md mx-auto my-8 p-6 rounded-xl border border-slate-800 bg-slate-950/80 shadow-2xl">
+                <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
+                  <Icon name="user-plus" className="w-5 h-5 text-blue-400" />
+                  {t.signUpTitle}
+                </h2>
+                <p className="text-xs text-slate-400 mb-6">{t.signUpDesc}</p>
+
+                {authMessage.text && (
+                  <div className={`p-3 mb-4 rounded text-xs font-semibold ${
+                    authMessage.type === 'error' ? 'bg-red-500/20 border border-red-500/40 text-red-300' : 
+                    authMessage.type === 'success' ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300' : 
+                    'bg-blue-500/20 border border-blue-500/40 text-blue-300'
+                  }`}>
+                    {authMessage.text}
+                  </div>
+                )}
+
+                <form onSubmit={handleSignUpSubmit} className="space-y-4 text-xs">
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.usernameLabel}</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder={t.usernamePlaceholder}
+                      value={formUsername}
+                      onChange={(e) => setFormUsername(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.passwordLabel}</label>
+                    <input 
+                      type="password" 
+                      required
+                      placeholder="••••••••"
+                      value={formPassword}
+                      onChange={(e) => setFormPassword(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.accountStatusLabel}</label>
+                    <select
+                      value={formStatus}
+                      onChange={(e) => setFormStatus(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="ENABLE">{t.statusActive}</option>
+                      <option value="DISABLE">{t.statusDisabled}</option>
+                    </select>
+                  </div>
+
+                  <button 
+                    type="submit"
+                    className="w-full py-2.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-bold transition shadow-lg mt-2"
+                  >
+                    {t.signUpBtn}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* VIEW 2: SIGN-IN PAGE */}
+            {currentView === 'signIn' && (
+              <div className="max-w-md mx-auto my-8 p-6 rounded-xl border border-slate-800 bg-slate-950/80 shadow-2xl">
+                <h2 className="text-xl font-bold mb-1 text-white flex items-center gap-2">
+                  <Icon name="log-in" className="w-5 h-5 text-blue-400" />
+                  {t.signInTitle}
+                </h2>
+                <p className="text-xs text-slate-400 mb-6">{t.signInDesc}</p>
+
+                {authMessage.text && (
+                  <div className={`p-3 mb-4 rounded text-xs font-semibold ${
+                    authMessage.type === 'error' ? 'bg-red-500/20 border border-red-500/40 text-red-300' : 
+                    authMessage.type === 'success' ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300' : 
+                    'bg-blue-500/20 border border-blue-500/40 text-blue-300'
+                  }`}>
+                    {authMessage.text}
+                  </div>
+                )}
+
+                <form onSubmit={handleSignInSubmit} className="space-y-4 text-xs">
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.usernameLabel}</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder={t.usernameLabel}
+                      value={formUsername}
+                      onChange={(e) => setFormUsername(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.passwordLabel}</label>
+                    <input 
+                      type="password" 
+                      required
+                      placeholder="••••••••"
+                      value={formPassword}
+                      onChange={(e) => setFormPassword(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <button 
+                    type="submit"
+                    className="w-full py-2.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-bold transition shadow-lg mt-2"
+                  >
+                    {t.signInBtn}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* VIEW 4: USER PROFILE & SETTINGS (MULTILINGUAL) */}
+            {currentView === 'profile' && (
+              <div className="max-w-xl mx-auto my-6 p-6 rounded-xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                    <Icon name="user" className="w-5 h-5 text-blue-400" />
+                    {t.viewProfile}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">{t.welcomeBack}, <span className="font-bold text-slate-200">{currentUser.username}</span>!</p>
+                </div>
+
+                {authMessage.text && (
+                  <div className="p-3 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold">
+                    {authMessage.text}
+                  </div>
+                )}
+
+                <form onSubmit={handleProfileUpdate} className="space-y-4 text-xs">
+                  <div className="p-4 rounded-lg bg-slate-900/80 border border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-slate-300">{t.accountStatusLabel}</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        currentUser.status === 'ENABLE' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                      }`}>
+                        {currentUser.status === 'ENABLE' ? t.statusActive : t.statusDisabled}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      {currentUser.status === 'ENABLE' ? t.accountActiveMsg : t.accountDisabledMsg}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setCurrentUser(prev => ({ ...prev, status: prev.status === 'ENABLE' ? 'DISABLE' : 'ENABLE' }))}
+                      className="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs transition"
+                    >
+                      {t.toggleStatusBtn}
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-medium mb-1">{t.langPrefLabel}</label>
+                    <select
+                      value={lang}
+                      onChange={(e) => setLang(e.target.value)}
+                      className="w-full p-2.5 rounded bg-slate-900 border border-slate-700 text-white focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="en">English (EN)</option>
+                      <option value="es">Español (ES)</option>
+                      <option value="zh">Simplified Chinese (简体中文)</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2 flex gap-3">
+                    <button 
+                      type="submit"
+                      className="flex-1 py-2.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-bold transition shadow-lg"
+                    >
+                      {t.saveSettingsBtn}
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={handleSignOut}
+                      className="px-4 py-2.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition"
+                    >
+                      {t.signOutBtn}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* VIEW 3: INTERACTIVE TRANSIT MAP & SERVICE STATUS DASHBOARD */}
+            {currentView === 'map' && (
+              <>
+                {/* Persona Segment Filter */}
+                <section className={`p-4 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/60'}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                      <Icon name="sliders-horizontal" className="w-4 h-4 text-blue-400" />
+                      {t.personaHeader}
+                    </h2>
+                    <span className="text-xs opacity-60">Personalizes Routing, Wayfinding & Accessibility Priority</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <button
+                      onClick={() => handlePersonaChange('commuter')}
+                      className={`p-3 rounded-lg border text-left transition-all ${
+                        activePersona === 'commuter'
+                          ? highContrast ? 'border-yellow-400 bg-yellow-400/20 text-yellow-300' : 'border-blue-500 bg-blue-950/40 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : highContrast ? 'border-yellow-400/30 text-yellow-400/60' : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 font-bold text-sm mb-1">
+                        <Icon name="zap" className="w-4 h-4 text-amber-400" />
+                        <span>{t.personaCommuter}</span>
+                      </div>
+                      <p className="text-xs opacity-80 leading-relaxed">{t.personaCommuterDesc}</p>
+                    </button>
+
+                    <button
+                      onClick={() => handlePersonaChange('wheelchair')}
+                      className={`p-3 rounded-lg border text-left transition-all ${
+                        activePersona === 'wheelchair'
+                          ? highContrast ? 'border-yellow-400 bg-yellow-400/20 text-yellow-300' : 'border-blue-500 bg-blue-950/40 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : highContrast ? 'border-yellow-400/30 text-yellow-400/60' : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 font-bold text-sm mb-1">
+                        <Icon name="accessibility" className="w-4 h-4 text-emerald-400" />
+                        <span>{t.personaWheelchair}</span>
+                      </div>
+                      <p className="text-xs opacity-80 leading-relaxed">{t.personaWheelchairDesc}</p>
+                    </button>
+
+                    <button
+                      onClick={() => handlePersonaChange('tourist')}
+                      className={`p-3 rounded-lg border text-left transition-all ${
+                        activePersona === 'tourist'
+                          ? highContrast ? 'border-yellow-400 bg-yellow-400/20 text-yellow-300' : 'border-blue-500 bg-blue-950/40 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : highContrast ? 'border-yellow-400/30 text-yellow-400/60' : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 font-bold text-sm mb-1">
+                        <Icon name="compass" className="w-4 h-4 text-purple-400" />
+                        <span>{t.personaTourist}</span>
+                      </div>
+                      <p className="text-xs opacity-80 leading-relaxed">{t.personaTouristDesc}</p>
+                    </button>
+                  </div>
+                </section>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  {/* Route Planner Side Control */}
+                  <div className="lg:col-span-5 space-y-4">
+                    <div className={`p-5 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                      <h2 className="text-base font-bold mb-4 flex items-center gap-2">
+                        <Icon name="navigation" className="w-5 h-5 text-blue-400" />
+                        {t.routePlannerTitle}
+                      </h2>
+
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-semibold uppercase text-slate-400 mb-1">{t.originLabel}</label>
+                          <select 
+                            value={origin} 
+                            onChange={(e) => setOrigin(e.target.value)}
+                            className={`w-full p-2.5 rounded-lg border text-sm focus:outline-none ${
+                              highContrast ? 'bg-black text-yellow-300 border-yellow-400' : 'bg-slate-900 border-slate-700 text-white'
+                            }`}
+                          >
+                            {Object.values(STATIONS_DATA).map(s => (
+                              <option key={`orig-${s.id}`} value={s.id}>{s.name} ({s.lines.join(', ')})</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="flex justify-center">
+                          <button 
+                            onClick={() => { const temp = origin; setOrigin(destination); setDestination(temp); }}
+                            className="p-1.5 rounded-full border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                          >
+                            <Icon name="arrow-right-left" className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold uppercase text-slate-400 mb-1">{t.destinationLabel}</label>
+                          <select 
+                            value={destination} 
+                            onChange={(e) => setDestination(e.target.value)}
+                            className={`w-full p-2.5 rounded-lg border text-sm focus:outline-none ${
+                              highContrast ? 'bg-black text-yellow-300 border-yellow-400' : 'bg-slate-900 border-slate-700 text-white'
+                            }`}
+                          >
+                            {Object.values(STATIONS_DATA).map(s => (
+                              <option key={`dest-${s.id}`} value={s.id}>{s.name} ({s.lines.join(', ')})</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 pt-3 border-t border-slate-800">
+                        <p className="text-xs text-slate-400 mb-2 font-medium">{t.quickLandmarks}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {LANDMARKS.map(lm => (
+                            <button
+                              key={lm.stationId}
+                              onClick={() => setDestination(lm.stationId)}
+                              className={`px-2.5 py-1 rounded-full text-xs font-medium border transition ${
+                                destination === lm.stationId
+                                  ? 'bg-blue-600 border-blue-500 text-white'
+                                  : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                              }`}
+                            >
+                              {lang === 'es' ? lm.nameEs : lang === 'zh' ? lm.nameZh : lm.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className={`p-4 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                          <Icon name="radio" className="w-4 h-4 text-emerald-400 animate-pulse" />
+                          {t.liveArrivals} @ {STATIONS_DATA[origin]?.name}
+                        </h3>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {liveArrivals.map((arr, idx) => (
+                          <div key={idx} className="p-2.5 rounded-lg border border-slate-800 bg-slate-900/80 flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <span className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs ${LINE_COLORS[arr.line] || 'bg-slate-700'}`}>
+                                {arr.line}
+                              </span>
+                              <div className="truncate max-w-[90px]">
+                                <p className="text-[11px] font-medium text-slate-200 truncate">{arr.destination}</p>
+                                <p className="text-[9px] text-slate-400">{arr.status}</p>
+                              </div>
+                            </div>
+                            <span className="font-mono text-sm font-bold text-emerald-400">{arr.minutes}m</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {routeResults && (
+                      <div className="space-y-3">
+                        {routeResults.map((opt) => {
+                          const isSelected = selectedRouteOption === opt.id;
+                          return (
+                            <div
+                              key={opt.id}
+                              onClick={() => setSelectedRouteOption(opt.id)}
+                              className={`p-4 rounded-xl border cursor-pointer transition-all ${
+                                isSelected
+                                  ? highContrast ? 'border-yellow-400 bg-yellow-400/20' : 'border-blue-500 bg-blue-950/30 ring-1 ring-blue-500'
+                                  : highContrast ? 'border-yellow-400/30' : 'border-slate-800 bg-slate-900/40 hover:border-slate-700'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between mb-2">
+                                <div>
+                                  <h3 className="font-bold text-sm flex items-center gap-2">
+                                    {opt.title}
+                                    {opt.isAda && (
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                        <Icon name="accessibility" className="w-3 h-3" /> ADA
+                                      </span>
+                                    )}
+                                  </h3>
+                                  <p className="text-xs opacity-75 mt-0.5 flex items-center gap-3">
+                                    <span className="flex items-center gap-1"><Icon name="clock" className="w-3 h-3" /> {opt.duration} {t.durationMinutes}</span>
+                                    <span>•</span>
+                                    <span>{opt.transfers} {t.transfers}</span>
+                                  </p>
+                                </div>
+                                
+                                <div className="flex items-center space-x-1">
+                                  {opt.lines.map((line, idx) => (
+                                    <span 
+                                      key={idx} 
+                                      className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shadow ${LINE_COLORS[line] || 'bg-slate-700 text-white'}`}
+                                    >
+                                      {line}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {isSelected && (
+                                <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2 text-xs">
+                                  {opt.steps.map((step, sIdx) => (
+                                    <div key={sIdx} className="flex items-start space-x-2 opacity-90">
+                                      <Icon name="chevron-right" className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                                      <span>{step}</span>
+                                    </div>
+                                  ))}
+
+                                  <div className="pt-2 flex items-center justify-between">
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); saveCurrentRoute(opt); }}
+                                      className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1 transition"
+                                    >
+                                      <Icon name="bookmark" className="w-3.5 h-3.5" />
+                                      {t.saveRouteBtn}
+                                    </button>
+                                    <span className="text-[10px] text-slate-400">GTFS Path Validated</span>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Interactive Vector Map OR Alternate Map Option View (Spec Requirement) */}
+                  <div className="lg:col-span-7">
+                    <div className={`p-4 rounded-xl border h-full flex flex-col ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                      <div className="flex flex-wrap items-center justify-between mb-3 gap-2">
+                        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                          <Icon name="map" className="w-4 h-4 text-blue-400" />
+                          {useAltMap ? t.alternateMapTitle : t.interactiveMapTitle}
+                        </h2>
+
+                        <div className="flex items-center space-x-2 text-xs">
+                          {/* Map Alternative Fallback Toggle */}
+                          <button 
+                            onClick={() => setUseAltMap(!useAltMap)}
+                            className="px-2.5 py-1 rounded-lg border text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700 transition"
+                          >
+                            {t.toggleAltMap}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Main Interactive Map View OR Text Alternate View */}
+                      {!useAltMap ? (
+                        <div className="relative flex-1 min-h-[460px] bg-slate-900 rounded-lg border border-slate-800 overflow-hidden">
+                          {mapLoading && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 z-20">
+                              <span className="text-amber-400 animate-pulse text-sm">Loading Real MTA Map Data...</span>
+                            </div>
+                          )}
+                          <div ref={mapContainerRef} className="w-full h-full min-h-[460px] z-10" />
+                        </div>
+                      ) : (
+                        /* Alternate Map View (Text-Based List for Accessibility / Tunnel Use) */
+                        <div className="flex-1 min-h-[460px] bg-slate-900 rounded-lg border border-slate-800 p-4 space-y-3 overflow-y-auto">
+                          <p className="text-xs text-slate-400 mb-2">High-accessibility text view for screen readers & low-bandwidth tunnel connections:</p>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {Object.values(STATIONS_DATA).map(st => (
+                              <div key={st.id} className="p-3 rounded-lg border border-slate-800 bg-slate-950/60 flex items-center justify-between">
+                                <div>
+                                  <h4 className="font-bold text-sm text-white">{st.name}</h4>
+                                  <div className="flex items-center space-x-1 mt-1">
+                                    {st.lines.map(l => (
+                                      <span key={l} className={`w-4 h-4 rounded-full flex items-center justify-center font-bold text-[9px] ${LINE_COLORS[l]}`}>{l}</span>
+                                    ))}
+                                    <span className="text-[10px] text-slate-400 ml-1">• {st.borough}</span>
+                                  </div>
+                                </div>
+                                <div className="flex flex-col items-end gap-1">
+                                  <button onClick={() => setOrigin(st.id)} className="px-2 py-0.5 rounded bg-blue-600/80 hover:bg-blue-600 text-white text-[10px] font-bold">
+                                    Origin
+                                  </button>
+                                  <button onClick={() => setDestination(st.id)} className="px-2 py-0.5 rounded bg-emerald-600/80 hover:bg-emerald-600 text-white text-[10px] font-bold">
+                                    Dest
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Realtime Alert & Outage Streams */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className={`p-5 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                        <Icon name="shield-alert" className="w-4 h-4 text-amber-400" />
+                        {t.gtfsFeedTitle}
+                      </h2>
+
+                      <div className="flex space-x-1 overflow-x-auto max-w-[200px]">
+                        <button 
+                          onClick={() => setFilterLine('ALL')}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${filterLine === 'ALL' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                        >
+                          ALL
+                        </button>
+                        {['1','2','A','N','7'].map(l => (
+                          <button
+                            key={l}
+                            onClick={() => setFilterLine(l)}
+                            className={`w-5 h-5 rounded-full text-[10px] font-bold ${LINE_COLORS[l]} ${filterLine === l ? 'ring-2 ring-white' : 'opacity-70'}`}
+                          >
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 max-h-[260px] overflow-y-auto pr-1">
+                      {filteredAlerts.length === 0 ? (
+                        <p className="text-xs opacity-60 italic text-center py-4">No active disruptions reported for line {filterLine}.</p>
+                      ) : (
+                        filteredAlerts.map(alert => (
+                          <div key={alert.id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/60 flex items-start space-x-3 text-xs">
+                            <span className={`w-6 h-6 rounded-full flex items-center justify-center font-bold shrink-0 ${alert.lineBg}`}>
+                              {alert.line}
+                            </span>
+                            <div className="flex-1">
+                              <p className="leading-relaxed">{alert.message}</p>
+                              <span className="text-[10px] opacity-50 mt-1 block">GTFS Realtime Verified</span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className={`p-5 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                        <Icon name="alert-triangle" className="w-4 h-4 text-red-400" />
+                        {t.equipmentOutageTitle}
+                      </h2>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">
+                        Live Outage Stream
+                      </span>
+                    </div>
+
+                    <div className="space-y-3 max-h-[260px] overflow-y-auto pr-1">
+                      {equipmentOutages.map(eq => (
+                        <div key={eq.id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/60 text-xs space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-slate-200">{eq.stationName}</span>
+                            {eq.status === 'OUT_OF_SERVICE' ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30 flex items-center gap-1">
+                                <Icon name="x-circle" className="w-3 h-3" /> OUT OF SERVICE
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                <Icon name="check-circle-2" className="w-3 h-3" /> OPERATIONAL
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-slate-400 text-[11px]">{eq.equipment}</p>
+                          
+                          {eq.status === 'OUT_OF_SERVICE' && (
+                            <div className="pt-1.5 border-t border-slate-800/80 flex items-start justify-between text-[11px] text-amber-300">
+                              <span>Workaround: {eq.workaround}</span>
+                              <span className="shrink-0 text-slate-500 font-mono text-[10px]">{eq.eta}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* In-Station Hub Navigation */}
+                <section className={`p-5 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="text-base font-bold flex items-center gap-2">
+                        <Icon name="compass" className="w-5 h-5 text-emerald-400" />
+                        {t.wayfindingTitle}
+                      </h2>
+                      <p className="text-xs opacity-75">{t.selectHub}</p>
+                    </div>
+
+                    <div className="flex space-x-2">
+                      {WAYFINDING_HUBS.map(hub => (
+                        <button
+                          key={hub.id}
+                          onClick={() => setSelectedHubId(hub.id)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                            selectedHubId === hub.id
+                              ? 'bg-emerald-600 border-emerald-500 text-white'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                          }`}
+                        >
+                          {hub.id} Hub
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-xl border border-slate-800 bg-slate-900/40 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="md:col-span-2 space-y-3">
+                      <h3 className="text-sm font-bold text-emerald-400">{activeHubData.name}</h3>
+                      <div className="space-y-2 text-xs">
+                        {activeHubData.steps.map((st, i) => (
+                          <div key={i} className="flex items-start space-x-2 p-2 rounded bg-slate-950/60 border border-slate-800/80">
+                            <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                              {i + 1}
+                            </span>
+                            <span className="leading-relaxed">
+                              {lang === 'es' ? st.textEs : lang === 'zh' ? st.textZh : st.textEn}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 border-t md:border-t-0 md:border-l border-slate-800 md:pl-4 pt-3 md:pt-0">
+                      <div>
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{t.transferTime}</span>
+                        <p className="text-lg font-bold text-white flex items-center gap-1.5 mt-0.5">
+                          <Icon name="clock" className="w-4 h-4 text-blue-400" />
+                          ~{activeHubData.transferWalkMinutes} mins
+                        </p>
+                      </div>
+
+                      <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
+                        <p className="font-bold mb-0.5 flex items-center gap-1">
+                          <Icon name="alert-triangle" className="w-3.5 h-3.5" />
+                          Stair Avoidance Notice
+                        </p>
+                        <p className="text-[11px] opacity-90">{activeHubData.avoidStairsNotice}</p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800">
+                        <p className="text-[10px] text-slate-400 mb-1">{t.emergencyTitle}</p>
+                        <a 
+                          href="tel:511" 
+                          className="px-3 py-1.5 rounded-lg bg-red-600/80 hover:bg-red-600 text-white font-medium text-xs flex items-center justify-center gap-1.5 transition"
+                        >
+                          <Icon name="phone" className="w-3.5 h-3.5" />
+                          {t.emergencyCall}
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Saved Favorite Routes */}
+                <section className={`p-5 rounded-xl border ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/70'}`}>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
+                    <Icon name="bookmark" className="w-4 h-4 text-blue-400" />
+                    {t.savedRoutesTitle}
+                  </h2>
+
+                  {savedRoutes.length === 0 ? (
+                    <p className="text-xs opacity-60 py-2 italic">{t.noSavedRoutes}</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {savedRoutes.map(fav => (
+                        <div key={fav.id} className="p-3 rounded-lg border border-slate-800 bg-slate-900/60 text-xs flex justify-between items-center">
+                          <div>
+                            <p className="font-bold text-slate-200">{fav.originName} → {fav.destName}</p>
+                            <p className="text-[10px] opacity-60 mt-0.5">{fav.duration} mins • Lines: {fav.lines?.join(', ')}</p>
+                          </div>
+                          <button 
+                            onClick={() => removeSavedRoute(fav.id)}
+                            className="p-1.5 text-slate-400 hover:text-red-400 transition"
+                          >
+                            <Icon name="x-circle" className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+          </main>
+
+          <footer className="border-t border-slate-800 mt-12 py-6 text-center text-xs opacity-60">
+            <p>© 2026 NYC Transit Hub Pro • Powered by GTFS Realtime & MTA Accessible Equipment APIs</p>
+          </footer>
+        </div>
+      );
+    }
+
+    const container = document.getElementById('root');
+    const root = ReactDOM.createRoot(container);
+    root.render(<App />);
+  </script>
+</body>
+</html>
