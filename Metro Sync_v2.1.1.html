@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NYC Transit Hub Pro</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Babel Compiler for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Leaflet Map CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0f172a;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    .leaflet-container {
+      background-color: #0f172a !important;
+      font-family: inherit;
+      z-index: 10;
+      border-radius: 0.75rem;
+    }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background-color: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+    }
+    .leaflet-control-zoom a {
+      background-color: #1e293b !important;
+      color: #f8fafc !important;
+      border-color: #334155 !important;
+    }
+    /* Official MTA Line Badge Base Styles */
+    .mta-badge-circle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9999px;
+      font-weight: 700;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+    .mta-badge-diamond {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transform: rotate(45deg);
+      border-radius: 2px;
+      font-weight: 700;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+    .mta-badge-diamond-inner {
+      transform: rotate(-45deg);
+      display: inline-block;
+    }
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- FIREBASE BACKEND SETUP FOUNDATION -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+    import { getAuth } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+    import { getFirestore } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+    window.dummyFirebaseConfig = {
+      apiKey: "AIzaSyDEMO_KEY_REPLACE_WITH_REAL",
+      authDomain: "nyc-transit-hub-demo.firebaseapp.com",
+      projectId: "nyc-transit-hub-demo",
+      storageBucket: "nyc-transit-hub-demo.appspot.com",
+      messagingSenderId: "123456789012",
+      appId: "1:123456789012:web:abcdef123456"
+    };
+
+    try {
+      const app = initializeApp(window.dummyFirebaseConfig);
+      window.firebaseAuth = getAuth(app);
+      window.firebaseDb = getFirestore(app);
+      console.log("Firebase initialized successfully in Demo Mode.");
+    } catch (e) {
+      console.warn("Firebase running in local fallback mock mode.");
+    }
+  </script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // Helper Component for Lucide Icons
+    const Icon = ({ name, className = "w-4 h-4", ...props }) => {
+      const containerRef = useRef(null);
+
+      useEffect(() => {
+        if (containerRef.current && window.lucide) {
+          containerRef.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+          window.lucide.createIcons({
+            nameAttr: 'data-lucide',
+            attrs: { class: className }
+          });
+        }
+      }, [name, className]);
+
+      return <span ref={containerRef} className="inline-flex items-center justify-center" {...props} />;
+    };
+
+    // Official MTA Trunk Line Palette Specs
+    const MTA_LINE_COLORS = {
+      '1': 'bg-[#EE352E] text-white', '2': 'bg-[#EE352E] text-white', '3': 'bg-[#EE352E] text-white',
+      '4': 'bg-[#00933C] text-white', '5': 'bg-[#00933C] text-white', '6': 'bg-[#00933C] text-white',
+      'A': 'bg-[#0039A6] text-white', 'C': 'bg-[#0039A6] text-white', 'E': 'bg-[#0039A6] text-white',
+      'N': 'bg-[#FCCC0A] text-black font-bold', 'Q': 'bg-[#FCCC0A] text-black font-bold', 'R': 'bg-[#FCCC0A] text-black font-bold', 'W': 'bg-[#FCCC0A] text-black font-bold',
+      'B': 'bg-[#FF6319] text-white', 'D': 'bg-[#FF6319] text-white', 'F': 'bg-[#FF6319] text-white', 'M': 'bg-[#FF6319] text-white',
+      '7': 'bg-[#B3519E] text-white', 'L': 'bg-[#A7A9AC] text-white', 'G': 'bg-[#6CBE45] text-white', 'J': 'bg-[#996633] text-white', 'Z': 'bg-[#996633] text-white',
+      'S': 'bg-[#808183] text-white'
+    };
+
+    const HEX_LINE_COLORS = {
+      '1': '#EE352E', '2': '#EE352E', '3': '#EE352E',
+      '4': '#00933C', '5': '#00933C', '6': '#00933C',
+      'A': '#0039A6', 'C': '#0039A6', 'E': '#0039A6',
+      'N': '#FCCC0A', 'Q': '#FCCC0A', 'R': '#FCCC0A', 'W': '#FCCC0A',
+      'B': '#FF6319', 'D': '#FF6319', 'F': '#FF6319', 'M': '#FF6319',
+      '7': '#B3519E', 'L': '#A7A9AC', 'G': '#6CBE45', 'J': '#996633', 'Z': '#996633',
+      'S': '#808183'
+    };
+
+    // MTA Line Badge Component (Supports Circle vs Express Diamond Badges)
+    const LineBadge = ({ line, isExpress = false, size = "w-5 h-5 text-[10px]" }) => {
+      const colorClass = MTA_LINE_COLORS[line] || 'bg-slate-700 text-white';
+      
+      if (isExpress) {
+        return (
+          <span 
+            className={`mta-badge-diamond ${size} ${colorClass}`}
+            aria-label={`${line} Express Line`}
+          >
+            <span className="mta-badge-diamond-inner">{line}</span>
+          </span>
+        );
+      }
+
+      return (
+        <span 
+          className={`mta-badge-circle ${size} ${colorClass}`}
+          aria-label={`${line} Local Line`}
+        >
+          {line}
+        </span>
+      );
+    };
+
+    // Station Data
+    const STATIONS_DATA = {
+      'CPS': { id: 'CPS', mta_id: '125', name: '59 St - Columbus Circle', lines: ['1','A','B','C','D'], ada: true, lat: 40.7682, lng: -73.9819, borough: 'Manhattan' },
+      'TSQ': { id: 'TSQ', mta_id: '127', name: 'Times Sq - 42 St', lines: ['1','2','3','7','N','Q','R','W','S'], ada: true, lat: 40.7559, lng: -73.9871, borough: 'Manhattan' },
+      'HUDSON': { id: 'HUDSON', mta_id: '726', name: '34 St - Hudson Yards', lines: ['7'], ada: true, lat: 40.7554, lng: -74.0021, borough: 'Manhattan' },
+      'PENN': { id: 'PENN', mta_id: '128', name: '34 St - Penn Station', lines: ['1','2','3','A','C','E'], ada: true, lat: 40.7506, lng: -73.9935, borough: 'Manhattan' },
+      'HERALD': { id: 'HERALD', mta_id: 'D17', name: '34 St - Herald Sq', lines: ['B','D','F','M','N','Q','R','W'], ada: true, lat: 40.7497, lng: -73.9878, borough: 'Manhattan' },
+      'GCT': { id: 'GCT', mta_id: '631', name: 'Grand Central - 42 St', lines: ['4','5','6','7','S'], ada: true, lat: 40.7527, lng: -73.9772, borough: 'Manhattan' },
+      'UNION': { id: 'UNION', mta_id: '635', name: '14 St - Union Sq', lines: ['4','5','6','L','N','Q','R','W'], ada: true, lat: 40.7359, lng: -73.9905, borough: 'Manhattan' },
+      'WTC': { id: 'WTC', mta_id: 'E01', name: 'World Trade Center / Cortlandt', lines: ['1','E','N','R','W'], ada: true, lat: 40.7115, lng: -74.0125, borough: 'Manhattan' },
+      'FULTON': { id: 'FULTON', mta_id: '229', name: 'Fulton St', lines: ['2','3','4','5','A','C','J','Z'], ada: true, lat: 40.7103, lng: -74.0090, borough: 'Manhattan' },
+      'BARC': { id: 'BARC', mta_id: '235', name: 'Atlantic Av - Barclays Ctr', lines: ['2','3','4','5','B','D','N','Q','R'], ada: true, lat: 40.6839, lng: -73.9788, borough: 'Brooklyn' }
+    };
+
+    // Nearby Places Database
+    const YELP_VENUES_DATABASE = {
+      'TSQ': [
+        { id: 'v1', name: 'Joe\'s Pizza Times Square', category: 'dining', rating: 4.8, reviews: 3420, price: '$', distance: '2 min walk', image: '🍕', text: 'Classic NYC thin-crust cheese slice staple.' },
+        { id: 'v2', name: 'Culture Espresso', category: 'coffee', rating: 4.9, reviews: 1210, price: '$', distance: '4 min walk', image: '☕', text: 'Famous chocolate chip cookies & craft coffee.' }
+      ],
+      'GCT': [
+        { id: 'v3', name: 'Grand Central Oyster Bar', category: 'dining', rating: 4.5, reviews: 2150, price: '$$$', distance: '1 min walk', image: '🦪', text: 'Historic seafood landmark inside GCT station.' },
+        { id: 'v4', name: 'Bryant Park Reading Room', category: 'arts', rating: 4.9, reviews: 890, price: 'Free', distance: '5 min walk', image: '🌳', text: 'Outdoor relaxation & chess games near 42nd St.' }
+      ],
+      'UNION': [
+        { id: 'v5', name: 'Union Square Greenmarket', category: 'shopping', rating: 4.8, reviews: 1840, price: '$$', distance: '1 min walk', image: '🍎', text: 'Fresh local produce, bakery, and cider artisan stalls.' }
+      ],
+      'BARC': [
+        { id: 'v6', name: 'Barclays Center Arena', category: 'arts', rating: 4.8, reviews: 4100, price: '$$$', distance: '1 min walk', image: '🏀', text: 'Brooklyn Nets, NY Liberty, and major concerts.' },
+        { id: 'v7', name: 'Junior\'s Restaurant Brooklyn', category: 'dining', rating: 4.6, reviews: 2900, price: '$$', distance: '8 min walk', image: '🍰', text: 'World-famous iconic Brooklyn cheesecake.' }
+      ]
+    };
+
+    // Service Alerts Demo Data
+    const INITIAL_GTFS_ALERTS = [
+      { id: 'gtfs-1', line: '7', isExpress: true, severity: 'warning', title: 'Flushing Line Delays', desc: 'Signal work at Queensboro Plaza is causing 5 to 8 minute delays.' },
+      { id: 'gtfs-2', line: 'A', isExpress: true, severity: 'info', title: 'Express Service Active', desc: 'A trains are running express in both directions in Manhattan.' },
+      { id: 'gtfs-3', line: 'L', isExpress: false, severity: 'warning', title: 'Planned Weekend Maintenance', desc: 'Trains share one track between 8 Av and 14 St-Union Sq.' }
+    ];
+
+    // Elevator & Escalator Status Demo Data
+    const INITIAL_ELEVATOR_OUTAGES = [
+      { stationId: 'GCT', equipment: 'Elevator EL204 (42nd St Entrance)', status: 'Under Repair', estimatedReturn: 'Today at 4:00 PM' },
+      { stationId: 'PENN', equipment: 'Escalator ES102 (7th Ave Concourse)', status: 'Inspecting', estimatedReturn: 'Today at 2:30 PM' }
+    ];
+
+    // --- De-coupled Offline Assistant Engine Logic ---
+    const runOfflineAssistantQuery = (query, currentOrigin, currentDest) => {
+      const q = query.toLowerCase().trim();
+      const originSt = STATIONS_DATA[currentOrigin];
+      const destSt = STATIONS_DATA[currentDest];
+
+      if (q.includes("step-free") || q.includes("elevator") || q.includes("wheelchair") || q.includes("ada") || q.includes("accessible")) {
+        const origAda = originSt?.ada ? "step-free accessible ♿" : "NOT step-free ⚠️";
+        const destAda = destSt?.ada ? "step-free accessible ♿" : "NOT step-free ⚠️";
+        return `Accessibility Check: ${originSt?.name || 'Origin'} is ${origAda}. ${destSt?.name || 'Destination'} is ${destAda}. For active equipment outages, check the Elevator Updates card.`;
+      }
+      if (q.includes("delay") || q.includes("alert") || q.includes("status") || q.includes("service") || q.includes("train")) {
+        return `Live Transit Alerts: Line 7 Express has signal delays at Queensboro Plaza. Line L has single-track maintenance near Union Sq. Line A Express is operating express in Manhattan.`;
+      }
+      if (q.includes("food") || q.includes("coffee") || q.includes("pizza") || q.includes("eat") || q.includes("near") || q.includes("place")) {
+        const venues = YELP_VENUES_DATABASE[currentDest] || YELP_VENUES_DATABASE['TSQ'];
+        const top = venues[0];
+        return `Top recommendation near ${destSt?.name || 'destination'}: ${top.name} (${top.image} ${top.price}, ${top.distance}) - ${top.text}`;
+      }
+      if (q.includes("transfer") || q.includes("route") || q.includes("fast") || q.includes("how to get")) {
+        return `Commute Guidance: To travel from ${originSt?.name} to ${destSt?.name}, the fastest route takes ~18 mins via N/Q express lines. Select Option 2 for 100% elevator-accessible routing.`;
+      }
+      return `Subterranean Assistant (Offline Mode): I can answer questions instantly about elevator accessibility, current subway line delays, fastest transfer options, or nearby food at ${destSt?.name}.`;
+    };
+
+    // 👇 插入这段代码 👇
+    class PriorityQueue {
+      constructor() { this.values = []; }
+      enqueue(val, priority) { this.values.push({ val, priority }); this.sort(); }
+      dequeue() { return this.values.shift(); }
+      sort() { this.values.sort((a, b) => a.priority - b.priority); }
+      isEmpty() { return this.values.length === 0; }
+    }
+
+    const findShortestPath = (graph, startNode, endNode) => {
+      const distances = {}; const previous = {}; const pq = new PriorityQueue();
+      Object.keys(graph).forEach(node => {
+        distances[node] = node === startNode ? 0 : Infinity; previous[node] = null;
+      });
+      pq.enqueue(startNode, 0);
+
+      while (!pq.isEmpty()) {
+        const { val: current } = pq.dequeue();
+        if (current === endNode) break;
+        const neighbors = graph[current] || [];
+        neighbors.forEach(neighbor => {
+          const time = distances[current] + neighbor.time;
+          if (time < distances[neighbor.to]) {
+            distances[neighbor.to] = time;
+            previous[neighbor.to] = { station: current, time: neighbor.time, line: neighbor.line };
+            pq.enqueue(neighbor.to, time);
+          }
+        });
+      }
+      if (distances[endNode] === Infinity) return null;
+      const path = []; let curr = endNode;
+      while (curr !== startNode) {
+        if (!previous[curr]) break;
+        path.unshift({ station: curr, ...previous[curr] });
+        curr = previous[curr].station;
+      }
+      return { totalTime: distances[endNode], path };
+    };
+
+    const TRANSIT_GRAPH = {
+      'CPS': [{ to: 'TSQ', line: '1', time: 240 }, { to: 'TSQ', line: 'A', time: 300 }],
+      'TSQ': [{ to: 'CPS', line: '1', time: 240 }, { to: 'HUDSON', line: '7', time: 120 }, { to: 'GCT', line: '7', time: 300 }, { to: 'PENN', line: '1', time: 180 }, { to: 'HERALD', line: 'N', time: 360 }],
+      'HUDSON': [{ to: 'TSQ', line: '7', time: 120 }],
+      'PENN': [{ to: 'TSQ', line: '1', time: 180 }, { to: 'HERALD', line: 'B', time: 120 }, { to: 'WTC', line: 'A', time: 480 }],
+      'HERALD': [{ to: 'TSQ', line: 'N', time: 360 }, { to: 'PENN', line: 'B', time: 120 }, { to: 'UNION', line: 'N', time: 240 }],
+      'GCT': [{ to: 'TSQ', line: '7', time: 300 }, { to: 'UNION', line: '4', time: 360 }],
+      'UNION': [{ to: 'GCT', line: '4', time: 360 }, { to: 'HERALD', line: 'N', time: 240 }, { to: 'FULTON', line: '4', time: 600 }],
+      'WTC': [{ to: 'PENN', line: 'A', time: 480 }, { to: 'FULTON', line: 'A', time: 180 }],
+      'FULTON': [{ to: 'WTC', line: 'A', time: 180 }, { to: 'UNION', line: '4', time: 600 }, { to: 'BARC', line: '2', time: 720 }],
+      'BARC': [{ to: 'FULTON', line: '2', time: 720 }]
+    };
+
+    const TRANSLATIONS = { en: {}, zh: {} };
+
+    function App() {
+      // Navigation State
+      const [currentView, setCurrentView] = useState('map');
+      
+      // Accessibility Controls
+      const [highContrast, setHighContrast] = useState(false);
+      const [useAltMap, setUseAltMap] = useState(false);
+
+      // User Sign-In State
+      const [currentUser, setCurrentUser] = useState({
+        isLoggedIn: true,
+        email: "demo.rider@mta.nyc",
+        displayName: "NYC Commuter"
+      });
+      const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+      const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup' | 'forgot'
+      const [authEmail, setAuthEmail] = useState('');
+      const [authPassword, setAuthPassword] = useState('');
+      const [authNotice, setAuthNotice] = useState('');
+
+      // Route Planner State
+      const [origin, setOrigin] = useState('TSQ');
+      const [destination, setDestination] = useState('BARC');
+      const [selectedRouteOption, setSelectedRouteOption] = useState(0);
+      const [routeResults, setRouteResults] = useState([]);
+
+      // Saved Favorite Routes
+      const [savedRoutes, setSavedRoutes] = useState(() => {
+        try {
+          const stored = localStorage.getItem('nyc_transit_saved_routes');
+          return stored ? JSON.parse(stored) : [
+            {
+              id: 101,
+              nickname: 'Daily Work Commute',
+              originId: 'TSQ',
+              destId: 'BARC',
+              originName: 'Times Sq - 42 St',
+              destName: 'Atlantic Av - Barclays Ctr',
+              lines: ['N', 'Q'],
+              duration: 18
+            }
+          ];
+        } catch (e) {
+          return [];
+        }
+      });
+      const [editingId, setEditingId] = useState(null);
+      const [editNameText, setEditNameText] = useState('');
+
+      // User Preferences
+      const [preferences, setPreferences] = useState({
+        preferStepFree: true,
+        notifyOutages: true,
+        maxTransfers: 2,
+        ecoGamification: true
+      });
+
+      // Eco Rider Metrics
+      const [ecoMetrics, setEcoMetrics] = useState({ totalRides: 14, co2SavedKg: 28.4, hoursSaved: 6.2 });
+      const [toastMsg, setToastMsg] = useState('');
+
+      // --- De-coupled Offline Assistant State ("What-If" Feature Toggle Ready) ---
+      const [isAssistantOpen, setIsAssistantOpen] = useState(false);
+      const [assistantInput, setAssistantInput] = useState('');
+      const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const [assistantMessages, setAssistantMessages] = useState([
+        { id: 1, sender: 'bot', text: 'Hello! I am your Offline NYC Transit Assistant. Ask me about delays, elevator accessibility, or places near your stop.' }
+      ]);
+
+      // Network Listener for Online/Offline state
+      useEffect(() => {
+        const handleOnline = () => setIsOnline(true);
+        const handleOffline = () => setIsOnline(false);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        return () => {
+          window.removeEventListener('online', handleOnline);
+          window.removeEventListener('offline', handleOffline);
+        };
+      }, []);
+
+      // Generic Map References
+      const mapContainerRef = useRef(null);
+      const mapInstanceRef = useRef(null);
+      const polylineRef = useRef(null);
+      const markersGroupRef = useRef(null);
+
+      const [lang, setLang] = useState('en');
+      const [geoData, setGeoData] = useState({ lines: null, stations: null });
+      const [transitGraph, setTransitGraph] = useState(null);
+      const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+
+      useEffect(() => {
+        fetch('./full_graph.json').then(res => res.json()).then(data => setTransitGraph(data)).catch(console.error);
+      }, []);
+
+      useEffect(() => {
+        if (currentView !== 'map' || useAltMap || !mapContainerRef.current) return;
+
+        if (!mapInstanceRef.current) {
+          const map = L.map(mapContainerRef.current, { center: [40.730, -73.980], zoom: 11, zoomControl: true });
+          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }).addTo(map);
+          mapInstanceRef.current = map;
+          markersGroupRef.current = L.layerGroup().addTo(map);
+        }
+
+        const loadGeoJSON = async () => {
+          const [linesRes, stationsRes] = await Promise.all([
+            fetch('https://data.ny.gov/resource/s692-irgq.geojson'),
+            fetch('https://data.ny.gov/resource/39hk-dx4f.geojson')
+          ]);
+          const lines = await linesRes.json();
+          const stations = await stationsRes.json();
+          setGeoData({ lines, stations });
+        };
+        if (!geoData.lines) loadGeoJSON();
+      }, [currentView, useAltMap]);
+
+      // 渲染 GeoJSON
+      useEffect(() => {
+        if (!mapInstanceRef.current || !geoData.lines || !markersGroupRef.current) return;
+        markersGroupRef.current.clearLayers();
+
+        L.geoJSON(geoData.lines, {
+          style: (feature) => ({ color: HEX_LINE_COLORS[feature.properties.route_id] || '#808080', weight: 4, opacity: 0.8 })
+        }).addTo(mapInstanceRef.current);
+
+        L.geoJSON(geoData.stations, {
+          pointToLayer: (feature, latlng) => {
+            const lineStr = feature.properties.daytime_routes || '';
+            let parsedLines = lineStr.split(/[\s,]+/).map(l => l === 'SIR' ? 'S' : l.split('')).flat().filter(c => HEX_LINE_COLORS[c]);
+            parsedLines = [...new Set(parsedLines)];
+            let fillColor = parsedLines.length === 1 ? HEX_LINE_COLORS[parsedLines[0]] : '#ffffff';
+            return L.circleMarker(latlng, { radius: 5, fillColor: fillColor, color: '#0f172a', weight: 2, fillOpacity: 1 });
+          },
+          onEachFeature: (feature, layer) => {
+            const name = feature.properties.stop_name || 'Unknown';
+            const lines = (feature.properties.daytime_routes || '').split(' ').join(', ');
+            layer.bindPopup(`<div class="text-xs"><b>${name}</b><br/>${lines}</div>`);
+          }
+        }).addTo(markersGroupRef.current);
+      }, [geoData]);
+
+
+      // Route Calculation & Polyline Visualizer
+      useEffect(() => {
+        if (origin === destination) { setRouteResults([]); return; }
+        
+        let result = null;
+        if (transitGraph) {
+          const startMtaId = STATIONS_DATA[origin].mta_id;
+          const endMtaId = STATIONS_DATA[destination].mta_id;
+          result = findShortestPath(transitGraph, startMtaId, endMtaId);
+        }
+
+        if (result && result.path.length > 0) {
+          const usedLines = [...new Set(result.path.map(p => p.line))].filter(Boolean);
+          const steps = result.path.map((step, i) => {
+            const from = i === 0 ? STATIONS_DATA[origin].name : `Station ${result.path[i-1].station}`;
+            return `Ride from ${from} to Station ${step.station} (${Math.round(step.time/60)} mins)`;
+          });
+          
+          setRouteResults([{
+            id: 0,
+            title: "Fastest Route (Real GTFS)",
+            duration: Math.round(result.totalTime / 60),
+            transfers: usedLines.length > 1 ? usedLines.length - 1 : 0,
+            isAda: false,
+            lines: usedLines.slice(0, 3),
+            isExpress: usedLines.map(() => false),
+            steps: steps.slice(0, 6)
+          }]);
+        } else {
+          setRouteResults([{ id: 0, title: "Option 1: Express Route", duration: 18, transfers: 1, isAda: true, lines: ['N', 'Q'], isExpress: [true, false], steps: ["Board N Express", "Transfer to Q", "Arrive"] }]);
+        }
+
+        // 👇 新增：绘制地图上的连线
+        if (mapInstanceRef.current) {
+          if (polylineRef.current) mapInstanceRef.current.removeLayer(polylineRef.current);
+          const startSt = STATIONS_DATA[origin]; const endSt = STATIONS_DATA[destination];
+          if (startSt && endSt) {
+            const midLat = (startSt.lat + endSt.lat) / 2 + 0.005;
+            const midLng = (startSt.lng + endSt.lng) / 2 - 0.005;
+            const latLngs = [[startSt.lat, startSt.lng], [midLat, midLng], [endSt.lat, endSt.lng]];
+            const activeLine = result && result.path.length > 0 ? result.path[0].line : '1';
+            polylineRef.current = L.polyline(latLngs, { color: HEX_LINE_COLORS[activeLine] || '#3b82f6', weight: 5, opacity: 0.85, dashArray: '8, 8' }).addTo(mapInstanceRef.current);
+            mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
+          }
+        }
+      }, [origin, destination, transitGraph]);
+
+
+      // Sign-In Handlers
+      const handleAuthSubmit = (e) => {
+        e.preventDefault();
+        if (!authEmail) {
+          setAuthNotice("Please enter a valid email address.");
+          return;
+        }
+
+        if (authMode === 'login' || authMode === 'signup') {
+          setCurrentUser({
+            isLoggedIn: true,
+            email: authEmail,
+            displayName: authEmail.split('@')[0]
+          });
+          showToast(`Welcome, ${authEmail}!`);
+          setIsAuthModalOpen(false);
+        } else if (authMode === 'forgot') {
+          setAuthNotice(`Password reset link sent to ${authEmail}`);
+          setTimeout(() => {
+            setAuthMode('login');
+            setAuthNotice('');
+          }, 2500);
+        }
+      };
+
+      const handleSignOut = () => {
+        setCurrentUser({ isLoggedIn: false, email: '', displayName: '' });
+        showToast("Signed out successfully.");
+      };
+
+      // Favorite Route Handlers
+      const handleSaveRoute = (opt) => {
+        const startSt = STATIONS_DATA[origin];
+        const endSt = STATIONS_DATA[destination];
+        
+        const newRoute = {
+          id: Date.now(),
+          nickname: `${startSt.name} ➔ ${endSt.name}`,
+          originId: origin,
+          destId: destination,
+          originName: startSt.name,
+          destName: endSt.name,
+          lines: opt.lines,
+          duration: opt.duration
+        };
+
+        setSavedRoutes(prev => [newRoute, ...prev]);
+        showToast(`Saved "${newRoute.nickname}" to Favorites!`);
+      };
+
+      const handleStartEdit = (fav) => {
+        setEditingId(fav.id);
+        setEditNameText(fav.nickname);
+      };
+
+      const handleSaveEdit = (id) => {
+        setSavedRoutes(prev => prev.map(r => r.id === id ? { ...r, nickname: editNameText } : r));
+        setEditingId(null);
+        showToast("Route name updated!");
+      };
+
+      const handleDeleteRoute = (id) => {
+        setSavedRoutes(prev => prev.filter(r => r.id !== id));
+        showToast("Route removed from favorites");
+      };
+
+      const handleLoadRoute = (fav) => {
+        setOrigin(fav.originId);
+        setDestination(fav.destId);
+        setCurrentView('map');
+        showToast(`Loaded "${fav.nickname}" on map!`);
+      };
+
+      const showToast = (msg) => {
+        setToastMsg(msg);
+        setTimeout(() => setToastMsg(''), 3000);
+      };
+
+      const handleLogTrip = () => {
+        setEcoMetrics(prev => ({
+          totalRides: prev.totalRides + 1,
+          co2SavedKg: parseFloat((prev.co2SavedKg + 1.8).toFixed(1)),
+          hoursSaved: parseFloat((prev.hoursSaved + 0.3).toFixed(1))
+        }));
+        showToast("Trip logged! Saved +1.8kg CO₂!");
+      };
+
+      // Assistant Message Submission
+      const handleSendAssistantMsg = (userText) => {
+        const textToProcess = userText || assistantInput;
+        if (!textToProcess.trim()) return;
+
+        const userMsgObj = { id: Date.now(), sender: 'user', text: textToProcess };
+        const responseText = runOfflineAssistantQuery(textToProcess, origin, destination);
+        const botMsgObj = { id: Date.now() + 1, sender: 'bot', text: responseText };
+
+        setAssistantMessages(prev => [...prev, userMsgObj, botMsgObj]);
+        setAssistantInput('');
+      };
+
+      return (
+        <div className={`min-h-screen transition-colors duration-200 ${highContrast ? 'bg-black text-yellow-300 font-mono' : 'bg-slate-900 text-slate-100 font-sans'}`}>
+          
+          {/* Notification Toast */}
+          {toastMsg && (
+            <div className="fixed bottom-6 right-6 z-50 bg-blue-600 text-white px-5 py-3.5 rounded-xl shadow-2xl text-xs font-bold flex items-center gap-2.5 animate-bounce border border-blue-400">
+              <Icon name="bookmark" className="w-4 h-4" />
+              {toastMsg}
+            </div>
+          )}
+
+          {/* Offline Assistant Floating Trigger Button */}
+          <button
+            onClick={() => setIsAssistantOpen(!isAssistantOpen)}
+            className="fixed bottom-6 left-6 z-40 bg-blue-600 hover:bg-blue-500 text-white p-3.5 rounded-full shadow-2xl flex items-center gap-2 font-bold text-xs border border-blue-400 transition hover:scale-105"
+            title="Open Subterranean Assistant"
+          >
+            <Icon name="message-square" className="w-5 h-5" />
+            <span className="hidden sm:inline">Offline Assistant</span>
+          </button>
+
+          {/* Offline Assistant Drawer */}
+          {isAssistantOpen && (
+            <div className="fixed bottom-20 left-6 z-50 w-80 sm:w-96 bg-slate-950 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col space-y-0">
+              <div className="bg-slate-900 p-3.5 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <div className="w-7 h-7 rounded-lg bg-blue-600/30 text-blue-400 border border-blue-500 flex items-center justify-center font-bold text-xs">
+                    AI
+                  </div>
+                  <div>
+                    <p className="font-bold text-xs text-white">NYC Transit Assistant</p>
+                    <p className="text-[10px] text-emerald-400 flex items-center gap-1">
+                      <span>⚡ {isOnline ? 'Online Sync' : 'Underground Offline Mode'}</span>
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setIsAssistantOpen(false)} className="text-slate-400 hover:text-white">
+                  <Icon name="x" className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Chat Message History */}
+              <div className="p-3 h-64 overflow-y-auto space-y-2 text-xs bg-slate-900/40">
+                {assistantMessages.map(m => (
+                  <div key={m.id} className={`flex ${m.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] p-2.5 rounded-xl ${
+                      m.sender === 'user' 
+                        ? 'bg-blue-600 text-white rounded-br-none' 
+                        : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-none'
+                    }`}>
+                      {m.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Quick Action Chips */}
+              <div className="p-2 bg-slate-950 border-t border-slate-800 flex flex-wrap gap-1">
+                <button onClick={() => handleSendAssistantMsg("Is route step-free accessible?")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
+                  ♿ Step-free access?
+                </button>
+                <button onClick={() => handleSendAssistantMsg("Check subway delays")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
+                  ⚠️ Check line delays
+                </button>
+                <button onClick={() => handleSendAssistantMsg("Food near stop")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
+                  🍕 Nearby food
+                </button>
+              </div>
+
+              {/* Input Form */}
+              <form onSubmit={(e) => { e.preventDefault(); handleSendAssistantMsg(); }} className="p-2 bg-slate-950 border-t border-slate-800 flex items-center gap-2">
+                <input 
+                  type="text"
+                  value={assistantInput}
+                  onChange={(e) => setAssistantInput(e.target.value)}
+                  placeholder="Ask assistant underground..."
+                  className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
+                <button type="submit" className="p-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs">
+                  <Icon name="send" className="w-3.5 h-3.5" />
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* Account Modal */}
+          {isAuthModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative space-y-4">
+                <button 
+                  onClick={() => setIsAuthModalOpen(false)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white"
+                >
+                  <Icon name="x" className="w-5 h-5" />
+                </button>
+
+                <div className="text-center space-y-1">
+                  <div className="w-12 h-12 bg-blue-600/20 text-blue-400 rounded-2xl mx-auto flex items-center justify-center text-xl font-bold border border-blue-500/30">
+                    MTA
+                  </div>
+                  <h3 className="text-lg font-bold text-white">
+                    {authMode === 'login' && 'Sign In to Transit Hub'}
+                    {authMode === 'signup' && 'Create Commuter Account'}
+                    {authMode === 'forgot' && 'Reset Password'}
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    {authMode === 'login' && 'Access saved favorite routes and synchronized travel preferences'}
+                    {authMode === 'signup' && 'Create an account to back up your favorite MTA routes'}
+                    {authMode === 'forgot' && 'Enter your email to receive a password reset link'}
+                  </p>
+                </div>
+
+                {authNotice && (
+                  <div className="p-3 bg-blue-950/60 border border-blue-500/40 rounded-xl text-xs text-blue-300 text-center font-medium">
+                    {authNotice}
+                  </div>
+                )}
+
+                <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Email Address</label>
+                    <input 
+                      type="email"
+                      required
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      placeholder="rider@example.com"
+                      className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  {authMode !== 'forgot' && (
+                    <div>
+                      <label className="block text-slate-300 font-semibold mb-1">Password</label>
+                      <input 
+                        type="password"
+                        required
+                        value={authPassword}
+                        onChange={(e) => setAuthPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
+                  >
+                    {authMode === 'login' && 'Sign In'}
+                    {authMode === 'signup' && 'Create Account'}
+                    {authMode === 'forgot' && 'Send Reset Email'}
+                  </button>
+                </form>
+
+                <div className="pt-2 border-t border-slate-800 text-center text-xs text-slate-400 flex justify-center gap-4">
+                  {authMode === 'login' ? (
+                    <>
+                      <button onClick={() => { setAuthMode('signup'); setAuthNotice(''); }} className="hover:text-white underline">Need an account? Register</button>
+                      <button onClick={() => { setAuthMode('forgot'); setAuthNotice(''); }} className="hover:text-white underline">Forgot password?</button>
+                    </>
+                  ) : (
+                    <button onClick={() => { setAuthMode('login'); setAuthNotice(''); }} className="hover:text-white underline">Back to Sign In</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Top Header */}
+          <header className={`border-b ${highContrast ? 'border-yellow-400 bg-black' : 'border-slate-800 bg-slate-950/90'} backdrop-blur sticky top-0 z-40`}>
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center space-x-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-xl shadow-lg ${highContrast ? 'bg-yellow-400 text-black' : 'bg-blue-600 text-white'}`}>
+                  MTA
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                    NYC Transit Hub Pro
+                    <span className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono">
+                      Live Updates
+                    </span>
+                  </h1>
+                  <p className="text-xs opacity-75 text-slate-400">Accessible Commuter Wayfinding</p>
+                </div>
+              </div>
+
+              {/* View & Accessibility Toggle */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setHighContrast(!highContrast)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition ${
+                    highContrast ? 'bg-yellow-400 text-black border-yellow-300' : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                  }`}
+                >
+                  <Icon name="eye" className="w-3.5 h-3.5" />
+                  {highContrast ? 'Standard Mode' : 'High Contrast'}
+                </button>
+
+                <nav className="flex items-center space-x-1 border rounded-xl p-1 border-slate-800 bg-slate-900">
+                  <button
+                    onClick={() => setCurrentView('map')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+                      currentView === 'map' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Icon name="map" className="w-3.5 h-3.5" />
+                    Map & Routes
+                  </button>
+
+                  <button
+                    onClick={() => setCurrentView('profile')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+                      currentView === 'profile' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Icon name="user" className="w-3.5 h-3.5" />
+                    Profile & Favorites ({savedRoutes.length})
+                  </button>
+                </nav>
+
+                {/* Account Controls */}
+                <div className="pl-2 border-l border-slate-800">
+                  {currentUser.isLoggedIn ? (
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full bg-blue-600/30 border border-blue-500 text-blue-400 flex items-center justify-center text-xs font-bold">
+                        {currentUser.displayName ? currentUser.displayName[0].toUpperCase() : 'U'}
+                      </div>
+                      <div className="hidden sm:block text-left text-[11px]">
+                        <p className="font-bold text-white leading-none">{currentUser.displayName}</p>
+                        <p className="text-slate-400 leading-none text-[10px] mt-0.5">{currentUser.email}</p>
+                      </div>
+                      <button
+                        onClick={handleSignOut}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white text-xs font-semibold border border-slate-700 transition"
+                      >
+                        Sign Out
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setAuthMode('login'); setAuthNotice(''); setIsAuthModalOpen(true); }}
+                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow transition flex items-center gap-1.5"
+                    >
+                      <Icon name="log-in" className="w-3.5 h-3.5" />
+                      Sign In / Register
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+            {/* VIEW 1: PROFILE & SAVED FAVORITES */}
+            {currentView === 'profile' && (
+              <div className="max-w-4xl mx-auto space-y-6">
+                
+                {/* Profile Overview */}
+                <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center space-x-4">
+                    <div className="w-14 h-14 rounded-full bg-blue-600/20 border-2 border-blue-500 flex items-center justify-center text-blue-400 text-xl font-bold">
+                      {currentUser.isLoggedIn ? currentUser.displayName[0].toUpperCase() : 'G'}
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-bold text-white">
+                        {currentUser.isLoggedIn ? `${currentUser.displayName}'s Profile` : 'Guest Profile'}
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        {currentUser.isLoggedIn ? currentUser.email : 'Local Demo Mode • Sign in to sync saved routes'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4 text-center">
+                    <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
+                      <p className="text-xs text-slate-400">Total Rides</p>
+                      <p className="text-base font-bold text-white">{ecoMetrics.totalRides}</p>
+                    </div>
+                    <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
+                      <p className="text-xs text-slate-400">CO₂ Saved</p>
+                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg} kg</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Saved Favorite Routes */}
+                <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                    <div>
+                      <h2 className="text-base font-bold text-white flex items-center gap-2">
+                        <Icon name="bookmark" className="w-5 h-5 text-blue-400" />
+                        Saved Favorite Routes
+                      </h2>
+                      <p className="text-xs text-slate-400">Manage saved routes or load them directly onto the map</p>
+                    </div>
+                    <span className="text-xs font-mono px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
+                      {savedRoutes.length} saved
+                    </span>
+                  </div>
+
+                  {savedRoutes.length === 0 ? (
+                    <div className="text-center py-8 text-slate-500 text-xs">
+                      <Icon name="bookmark" className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      No saved routes yet. Use "Bookmark Route" on any calculated route on the map!
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {savedRoutes.map(fav => (
+                        <div key={fav.id} className="p-4 rounded-xl border border-slate-800 bg-slate-900/80 flex flex-wrap items-center justify-between gap-4">
+                          {editingId === fav.id ? (
+                            <div className="flex items-center gap-2 flex-1">
+                              <input 
+                                type="text"
+                                value={editNameText}
+                                onChange={(e) => setEditNameText(e.target.value)}
+                                className="p-2 rounded-lg bg-slate-950 border border-blue-500 text-white text-xs flex-1 focus:outline-none"
+                                placeholder="Enter route name..."
+                              />
+                              <button 
+                                onClick={() => handleSaveEdit(fav.id)}
+                                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              <p className="font-bold text-sm text-slate-100 flex items-center gap-2">
+                                <span>{fav.nickname}</span>
+                                <button onClick={() => handleStartEdit(fav)} className="text-slate-400 hover:text-blue-400 transition" title="Rename Route">
+                                  <Icon name="pencil" className="w-3.5 h-3.5" />
+                                </button>
+                              </p>
+                              <p className="text-xs text-slate-400">
+                                {fav.originName} ➔ {fav.destName} • {fav.duration} mins
+                              </p>
+                              <div className="flex items-center gap-1.5 mt-1">
+                                {fav.lines.map((l, i) => (
+                                  <LineBadge key={i} line={l} size="w-5 h-5 text-[10px]" />
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => handleLoadRoute(fav)}
+                              className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow"
+                            >
+                              <Icon name="navigation" className="w-3.5 h-3.5" /> Show on Map
+                            </button>
+                            <button 
+                              onClick={() => handleDeleteRoute(fav.id)}
+                              className="p-2 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-400 hover:text-white transition"
+                              title="Delete Route"
+                            >
+                              <Icon name="trash-2" className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Commute Preferences */}
+                <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
+                  <h2 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-800 pb-3">
+                    <Icon name="sliders" className="w-5 h-5 text-blue-400" />
+                    Commuter Preferences
+                  </h2>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900 cursor-pointer">
+                      <span className="text-slate-300 font-semibold">Prefer Step-Free Accessible Elevators</span>
+                      <input 
+                        type="checkbox" 
+                        checked={preferences.preferStepFree}
+                        onChange={(e) => setPreferences({ ...preferences, preferStepFree: e.target.checked })}
+                        className="w-4 h-4 rounded text-blue-600"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900 cursor-pointer">
+                      <span className="text-slate-300 font-semibold">Elevator Outage Notifications</span>
+                      <input 
+                        type="checkbox" 
+                        checked={preferences.notifyOutages}
+                        onChange={(e) => setPreferences({ ...preferences, notifyOutages: e.target.checked })}
+                        className="w-4 h-4 rounded text-blue-600"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+            {/* VIEW 2: INTERACTIVE MAP & ROUTE PLANNER */}
+            {currentView === 'map' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                
+                {/* Left Side: Route Controls */}
+                <div className="lg:col-span-5 space-y-4">
+                  
+                  {/* Origin / Destination Selector */}
+                  <div className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
+                    <h2 className="text-base font-bold flex items-center gap-2 text-white">
+                      <Icon name="navigation" className="w-5 h-5 text-blue-400" />
+                      NYC Route Finder
+                    </h2>
+
+                    <div className="space-y-3 text-xs">
+                      <div>
+                        <label className="block text-slate-400 font-semibold mb-1">Start Station</label>
+                        <select 
+                          value={origin} 
+                          onChange={(e) => setOrigin(e.target.value)}
+                          className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
+                        >
+                          {Object.values(STATIONS_DATA).map(s => (
+                            <option key={`orig-${s.id}`} value={s.id}>{s.name} ({s.borough})</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-400 font-semibold mb-1">Destination Station</label>
+                        <select 
+                          value={destination} 
+                          onChange={(e) => setDestination(e.target.value)}
+                          className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
+                        >
+                          {Object.values(STATIONS_DATA).map(s => (
+                            <option key={`dest-${s.id}`} value={s.id}>{s.name} ({s.borough})</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Calculated Route Cards */}
+                  <div className="space-y-3">
+                    {routeResults.map((opt) => (
+                      <div
+                        key={opt.id}
+                        onClick={() => setSelectedRouteOption(opt.id)}
+                        className={`p-4 rounded-2xl border cursor-pointer transition shadow-lg ${
+                          selectedRouteOption === opt.id 
+                            ? 'border-blue-500 bg-blue-950/30 ring-1 ring-blue-500/50' 
+                            : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between mb-2">
+                          <div>
+                            <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                              {opt.title}
+                              {opt.isAda && <span className="text-[10px] text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded border border-blue-800">♿ Accessible</span>}
+                            </h3>
+                            <p className="text-xs text-slate-400 mt-0.5">{opt.duration} mins • {opt.transfers} transfer(s)</p>
+                          </div>
+                          <div className="flex items-center space-x-1.5">
+                            {opt.lines.map((l, idx) => (
+                              <LineBadge 
+                                key={idx} 
+                                line={l} 
+                                isExpress={opt.isExpress ? opt.isExpress[idx] : false} 
+                                size="w-6 h-6 text-xs" 
+                              />
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Step Details */}
+                        <div className="space-y-1.5 my-3 pl-2 border-l-2 border-slate-800 text-xs text-slate-300">
+                          {opt.steps.map((st, i) => (
+                            <p key={i} className="flex items-start gap-1.5">
+                              <span className="text-slate-500">•</span> {st}
+                            </p>
+                          ))}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                          <button
+                            onClick={handleLogTrip}
+                            className="text-[11px] text-emerald-400 hover:underline flex items-center gap-1 font-semibold"
+                          >
+                            <Icon name="leaf" className="w-3.5 h-3.5" /> Log Trip (+1.8kg CO₂)
+                          </button>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSaveRoute(opt);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow"
+                          >
+                            <Icon name="bookmark" className="w-3.5 h-3.5" />
+                            Bookmark Route
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Places Near Destination */}
+                  <div className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                      <Icon name="map-pin" className="w-4 h-4 text-red-400" />
+                      Places Near {STATIONS_DATA[destination]?.name}
+                    </h2>
+
+                    <div className="space-y-2">
+                      {(YELP_VENUES_DATABASE[destination] || YELP_VENUES_DATABASE['TSQ']).map(v => (
+                        <div key={v.id} className="p-3 rounded-xl border border-slate-800 bg-slate-900/60 flex items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center space-x-3">
+                            <span className="text-xl">{v.image}</span>
+                            <div>
+                              <p className="font-bold text-white">{v.name}</p>
+                              <p className="text-[11px] text-slate-400">{v.text}</p>
+                            </div>
+                          </div>
+                          <div className="text-right whitespace-nowrap">
+                            <p className="font-bold text-amber-400">★ {v.rating}</p>
+                            <p className="text-[10px] text-slate-500">{v.distance}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Right Side: Map & Live Service Updates */}
+                <div className="lg:col-span-7 space-y-4">
+                  
+                  {/* Interactive Map Header */}
+                  <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                        <Icon name="map" className="w-4 h-4 text-blue-400" />
+                        Interactive Transit Map
+                      </h2>
+
+                      <button
+                        onClick={() => setUseAltMap(!useAltMap)}
+                        className="text-xs text-slate-400 hover:text-white underline flex items-center gap-1"
+                      >
+                        <Icon name="list" className="w-3.5 h-3.5" />
+                        {useAltMap ? 'Show Map View' : 'Station List View'}
+                      </button>
+                    </div>
+
+                    {!useAltMap ? (
+                      <div ref={mapContainerRef} className="h-[440px] w-full rounded-xl border border-slate-800 shadow-inner"></div>
+                    ) : (
+                      <div className="p-4 rounded-xl border border-slate-800 bg-slate-900 space-y-2 text-xs">
+                        <p className="font-bold text-slate-300">Station Overview List:</p>
+                        {Object.values(STATIONS_DATA).map(s => (
+                          <div key={`alt-${s.id}`} className="p-2 border-b border-slate-800 flex justify-between items-center">
+                            <span>{s.name} ({s.borough})</span>
+                            <div className="flex gap-1 items-center">
+                              {s.lines.map((l, i) => (
+                                <LineBadge key={i} line={l} size="w-4 h-4 text-[9px]" />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Live Service Alerts & Elevator Monitor */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    
+                    {/* Train Service Alerts */}
+                    <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                        <Icon name="alert-triangle" className="w-4 h-4" />
+                        Subway Service Alerts
+                      </h3>
+
+                      <div className="space-y-2 text-xs">
+                        {INITIAL_GTFS_ALERTS.map(alt => (
+                          <div key={alt.id} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                            <div className="flex items-center gap-2 font-bold text-white">
+                              <LineBadge line={alt.line} isExpress={alt.isExpress} size="w-5 h-5 text-[10px]" />
+                              <span>{alt.title}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-400">{alt.desc}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Elevator & Escalator Status */}
+                    <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                        <Icon name="accessibility" className="w-4 h-4" />
+                        Elevator & Escalator Updates
+                      </h3>
+
+                      <div className="space-y-2 text-xs">
+                        {INITIAL_ELEVATOR_OUTAGES.map((out, i) => (
+                          <div key={i} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                            <p className="font-bold text-slate-200">{out.equipment}</p>
+                            <div className="flex justify-between text-[11px]">
+                              <span className="text-red-400 font-semibold">{out.status}</span>
+                              <span className="text-slate-500">ETA: {out.estimatedReturn}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                  </div>
+
+                </div>
+
+              </div>
+            )}
+
+          </main>
+        </div>
+      );
+    }
+
+    const container = document.getElementById('root');
+    const root = ReactDOM.createRoot(container);
+    root.render(<App />);
+  </script>
+</body>
+</html>
