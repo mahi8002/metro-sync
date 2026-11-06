@@ -113,6 +113,7 @@
     }
   </script>
 
+  <script src="./achievements.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
 
@@ -157,7 +158,7 @@
     // MTA Line Badge Component (Supports Circle vs Express Diamond Badges)
     const LineBadge = ({ line, isExpress = false, size = "w-5 h-5 text-[10px]" }) => {
       const colorClass = MTA_LINE_COLORS[line] || 'bg-slate-700 text-white';
-      
+
       if (isExpress) {
         return (
           <span 
@@ -307,7 +308,7 @@
     function App() {
       // Navigation State
       const [currentView, setCurrentView] = useState('map');
-      
+
       // Accessibility Controls
       const [highContrast, setHighContrast] = useState(false);
       const [useAltMap, setUseAltMap] = useState(false);
@@ -325,8 +326,12 @@
       const [authNotice, setAuthNotice] = useState('');
 
       // Route Planner State
-      const [origin, setOrigin] = useState('TSQ');
-      const [destination, setDestination] = useState('BARC');
+      const [origin, setOrigin] = useState(() => {
+        try { const id = JSON.parse(localStorage.getItem('metro_sync_achievements_v1'))?.active?.origin; return STATIONS_DATA[id] ? id : 'TSQ'; } catch { return 'TSQ'; }
+      });
+      const [destination, setDestination] = useState(() => {
+        try { const id = JSON.parse(localStorage.getItem('metro_sync_achievements_v1'))?.active?.destination; return STATIONS_DATA[id] ? id : 'BARC'; } catch { return 'BARC'; }
+      });
       const [selectedRouteOption, setSelectedRouteOption] = useState(0);
       const [routeResults, setRouteResults] = useState([]);
 
@@ -334,7 +339,7 @@
       const [savedRoutes, setSavedRoutes] = useState(() => {
         try {
           const stored = localStorage.getItem('nyc_transit_saved_routes');
-          return stored ? JSON.parse(stored) : [
+          return stored ? (Array.isArray(JSON.parse(stored)) ? JSON.parse(stored).filter(r => r && STATIONS_DATA[r.originId] && STATIONS_DATA[r.destId] && Array.isArray(r.lines)) : []) : [
             {
               id: 101,
               nickname: 'Daily Work Commute',
@@ -362,7 +367,32 @@
       });
 
       // Eco Rider Metrics
-      const [ecoMetrics, setEcoMetrics] = useState({ totalRides: 14, co2SavedKg: 28.4, hoursSaved: 6.2 });
+      const [achievementProfile, setAchievementProfile] = useState(() => {
+        try { return MetroAchievements.normalize(JSON.parse(localStorage.getItem('metro_sync_achievements_v1'))); }
+        catch { return MetroAchievements.empty(); }
+      });
+      const [storageWarning, setStorageWarning] = useState('');
+      const [achievementNotice, setAchievementNotice] = useState([]);
+      const knownUnlocks = useRef(new Set(Object.keys(achievementProfile.unlocked)));
+      const achievementStats = MetroAchievements.stats(achievementProfile);
+      const ecoMetrics = { totalRides: achievementStats.rides, co2SavedKg: (achievementStats.rides * 1.8).toFixed(1) };
+      const journeyCompleted = achievementProfile.active?.origin === origin && achievementProfile.active?.destination === destination && achievementProfile.trips.some(t => t.id === achievementProfile.active.id);
+      const journeyId = () => window.crypto?.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+      useEffect(() => {
+        const id = journeyId();
+        setAchievementProfile(prev => prev.active?.origin === origin && prev.active?.destination === destination ? prev : MetroAchievements.start(prev, origin, destination, id));
+      }, [origin, destination]);
+      useEffect(() => {
+        try { localStorage.setItem('metro_sync_achievements_v1', JSON.stringify(achievementProfile)); }
+        catch { setStorageWarning('Storage unavailable or full. Changes may be lost on reload.'); }
+        const newlyUnlocked = MetroAchievements.definitions.filter(d => achievementProfile.unlocked[d.id] && !knownUnlocks.current.has(d.id));
+        if (newlyUnlocked.length) setAchievementNotice(prev => [...prev, ...newlyUnlocked]);
+        knownUnlocks.current = new Set(Object.keys(achievementProfile.unlocked));
+      }, [achievementProfile]);
+      useEffect(() => {
+        try { localStorage.setItem('nyc_transit_saved_routes', JSON.stringify(savedRoutes)); }
+        catch { setStorageWarning('Storage unavailable or full. Changes may be lost on reload.'); }
+      }, [savedRoutes]);
       const [toastMsg, setToastMsg] = useState('');
 
       // --- De-coupled Offline Assistant State ("What-If" Feature Toggle Ready) ---
@@ -451,7 +481,7 @@
       // Route Calculation & Polyline Visualizer
       useEffect(() => {
         if (origin === destination) { setRouteResults([]); return; }
-        
+
         let result = null;
         if (transitGraph) {
           const startMtaId = STATIONS_DATA[origin].mta_id;
@@ -465,7 +495,7 @@
             const from = i === 0 ? STATIONS_DATA[origin].name : `Station ${result.path[i-1].station}`;
             return `Ride from ${from} to Station ${step.station} (${Math.round(step.time/60)} mins)`;
           });
-          
+
           setRouteResults([{
             id: 0,
             title: "Fastest Route (Real GTFS)",
@@ -530,7 +560,7 @@
       const handleSaveRoute = (opt) => {
         const startSt = STATIONS_DATA[origin];
         const endSt = STATIONS_DATA[destination];
-        
+
         const newRoute = {
           id: Date.now(),
           nickname: `${startSt.name} ➔ ${endSt.name}`,
@@ -543,6 +573,8 @@
         };
 
         setSavedRoutes(prev => [newRoute, ...prev]);
+        const now = new Date().toISOString();
+        setAchievementProfile(prev => MetroAchievements.bookmark(prev, now));
         showToast(`Saved "${newRoute.nickname}" to Favorites!`);
       };
 
@@ -575,12 +607,16 @@
       };
 
       const handleLogTrip = () => {
-        setEcoMetrics(prev => ({
-          totalRides: prev.totalRides + 1,
-          co2SavedKg: parseFloat((prev.co2SavedKg + 1.8).toFixed(1)),
-          hoursSaved: parseFloat((prev.hoursSaved + 0.3).toFixed(1))
-        }));
-        showToast("Trip logged! Saved +1.8kg CO₂!");
+        if (origin === destination) return;
+        if (journeyCompleted) {
+          const id = journeyId();
+          setAchievementProfile(prev => MetroAchievements.start(prev, origin, destination, id));
+          showToast('New journey started. Confirm completion after arrival.');
+          return;
+        }
+        if (!window.confirm('Have you completed this journey? Only the origin and destination count as visited. This is a self-reported record.')) return;
+        const now = new Date().toISOString();
+        setAchievementProfile(prev => MetroAchievements.complete(prev, now));
       };
 
       // Assistant Message Submission
@@ -598,7 +634,15 @@
 
       return (
         <div className={`min-h-screen transition-colors duration-200 ${highContrast ? 'bg-black text-yellow-300 font-mono' : 'bg-slate-900 text-slate-100 font-sans'}`}>
-          
+
+          {storageWarning && <div role="alert" className="p-3 bg-amber-950 text-amber-200 text-sm">{storageWarning}</div>}
+          {achievementNotice.length > 0 && (
+            <div role="status" aria-live="polite" className="fixed top-24 right-4 z-50 max-w-sm rounded-xl border border-amber-400 bg-slate-950 p-4 shadow-xl">
+              <button aria-label="Dismiss achievement notification" onClick={() => setAchievementNotice([])} className="float-right ml-4 text-slate-300">✕</button>
+              <p className="font-bold text-amber-300">Achievement unlocked!</p>
+              {achievementNotice.map(d => <p key={d.id} className="mt-2 text-white">{d.icon} {d.name}</p>)}
+            </div>
+          )}
           {/* Notification Toast */}
           {toastMsg && (
             <div className="fixed bottom-6 right-6 z-50 bg-blue-600 text-white px-5 py-3.5 rounded-xl shadow-2xl text-xs font-bold flex items-center gap-2.5 animate-bounce border border-blue-400">
@@ -685,7 +729,7 @@
           {isAuthModalOpen && (
             <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative space-y-4">
-                <button 
+                <button
                   onClick={() => setIsAuthModalOpen(false)}
                   className="absolute top-4 right-4 text-slate-400 hover:text-white"
                 >
@@ -854,7 +898,7 @@
             {/* VIEW 1: PROFILE & SAVED FAVORITES */}
             {currentView === 'profile' && (
               <div className="max-w-4xl mx-auto space-y-6">
-                
+
                 {/* Profile Overview */}
                 <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl flex flex-wrap items-center justify-between gap-4">
                   <div className="flex items-center space-x-4">
@@ -877,7 +921,7 @@
                       <p className="text-base font-bold text-white">{ecoMetrics.totalRides}</p>
                     </div>
                     <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                      <p className="text-xs text-slate-400">CO₂ Saved</p>
+                      <p className="text-xs text-slate-400">Estimated CO₂ Saved</p>
                       <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg} kg</p>
                     </div>
                   </div>
@@ -963,6 +1007,27 @@
                   )}
                 </div>
 
+                <section aria-labelledby="achievements-title" className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 space-y-4">
+                  <div className="flex justify-between items-center gap-3">
+                    <h2 id="achievements-title" className="font-bold text-white">🏆 Your Achievements</h2>
+                    <span className="text-sm text-amber-300">{Object.keys(achievementProfile.unlocked).length} / {MetroAchievements.definitions.length} unlocked</span>
+                  </div>
+                  <p className="text-xs text-slate-400">Self-reported journeys • Saved on this browser only, shared across demo accounts. No cloud sync. Only confirmed origins and destinations count as visited.</p>
+                  <p className="text-sm text-slate-300">{achievementStats.rides} completed journeys · {achievementStats.stations} unique stations</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {MetroAchievements.definitions.map(d => {
+                      const unlockedAt = achievementProfile.unlocked[d.id];
+                      const progress = Math.min(achievementStats[d.metric], d.target);
+                      return <article key={d.id} className={'p-4 rounded-xl border ' + (unlockedAt ? 'border-amber-500/60 bg-amber-950/20' : 'border-slate-700 bg-slate-900')}>
+                        <div className="flex gap-3 items-center"><span aria-hidden="true" className={'text-3xl ' + (unlockedAt ? '' : 'grayscale opacity-60')}>{d.icon}</span><h3 className="font-bold text-sm text-white">{d.name}</h3></div>
+                        <p className="text-xs text-slate-300 mt-3">{d.description}</p>
+                        <progress aria-label={d.name + ' progress'} value={progress} max={d.target} className="w-full h-2 mt-3 accent-amber-400" />
+                        <p className="text-xs text-slate-400 mt-2">{unlockedAt ? 'Unlocked ' + new Date(unlockedAt).toLocaleDateString() : 'Locked · ' + progress + ' / ' + d.target}</p>
+                      </article>;
+                    })}
+                  </div>
+                  <p className="text-xs text-slate-500">CO₂ savings are an illustrative estimate of 1.8 kg per journey, not a measured reduction.</p>
+                </section>
                 {/* Commute Preferences */}
                 <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
                   <h2 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-800 pb-3">
@@ -999,10 +1064,10 @@
             {/* VIEW 2: INTERACTIVE MAP & ROUTE PLANNER */}
             {currentView === 'map' && (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                
+
                 {/* Left Side: Route Controls */}
                 <div className="lg:col-span-5 space-y-4">
-                  
+
                   {/* Origin / Destination Selector */}
                   <div className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
                     <h2 className="text-base font-bold flex items-center gap-2 text-white">
@@ -1086,7 +1151,7 @@
                             onClick={handleLogTrip}
                             className="text-[11px] text-emerald-400 hover:underline flex items-center gap-1 font-semibold"
                           >
-                            <Icon name="leaf" className="w-3.5 h-3.5" /> Log Trip (+1.8kg CO₂)
+                            <Icon name="leaf" className="w-3.5 h-3.5" /> {journeyCompleted ? 'Start Another Journey' : 'Complete Journey'}
                           </button>
 
                           <button
@@ -1134,7 +1199,7 @@
 
                 {/* Right Side: Map & Live Service Updates */}
                 <div className="lg:col-span-7 space-y-4">
-                  
+
                   {/* Interactive Map Header */}
                   <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
                     <div className="flex items-center justify-between">
@@ -1173,7 +1238,7 @@
 
                   {/* Live Service Alerts & Elevator Monitor */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    
+
                     {/* Train Service Alerts */}
                     <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
