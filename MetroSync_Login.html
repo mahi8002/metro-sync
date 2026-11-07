@@ -22,7 +22,6 @@
 <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="3" width="14" height="15" rx="4"/><path d="M5 10h14M12 3v7M8 18l-2 3m10-3 2 3"/><circle cx="8.5" cy="14" r=".8"/><circle cx="15.5" cy="14" r=".8"/></svg></div>
 <h2 id="login-title">Welcome back</h2>
 <p class="subtitle">Sign in to keep your commute in sync.</p>
-<!-- HTML/CSS-only prototype. Connect an authentication service before enabling real sign-in. Inputs intentionally have no name attributes to prevent credential submission. -->
 <form>
 <label for="email">Email address</label><input id="email" type="email" placeholder="you@example.com" autocomplete="email" required>
 <label for="password">Password</label><input id="password" type="password" placeholder="Enter your password" autocomplete="current-password" required>
@@ -30,12 +29,12 @@
 <button class="submit" type="button" popovertarget="login-note">Sign in</button>
 </form>
 <p class="register">New to MetroSync? <button class="text-button" type="button" popovertarget="register-note">Create an account</button></p>
-<p class="note">Preview only · Account sign-in is not connected yet.</p>
+
 </section>
 </main>
 <footer>MetroSync · Made for the way New York moves.</footer>
-<div id="login-note" popover><h3>Sign-in preview</h3><p>This page is a design prototype. Account authentication is not connected yet. Your credentials have not been sent or saved.</p><button class="submit" type="button" popovertarget="login-note" popovertargetaction="hide">Back to sign in</button></div>
-<div id="reset-note" popover><h3>Password reset</h3><p>Password recovery will be available once account authentication is connected.</p><button class="submit" type="button" popovertarget="reset-note" popovertargetaction="hide">Got it</button></div>
-<div id="register-note" popover><h3>Create your account</h3><p>Account registration will be available once account authentication is connected.</p><button class="submit" type="button" popovertarget="register-note" popovertargetaction="hide">Got it</button></div>
+<div id="login-note" popover><h3>Sign-in preview</h3><button class="submit" type="button" popovertarget="login-note" popovertargetaction="hide">Back to sign in</button></div>
+<div id="reset-note" popover><h3>Password reset</h3><button class="submit" type="button" popovertarget="reset-note" popovertargetaction="hide">Got it</button></div>
+<div id="register-note" popover><h3>Create your account</h3><button class="submit" type="button" popovertarget="register-note" popovertargetaction="hide">Got it</button></div>
 </body>
 </html>
