@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Build output and test artifacts
+dist/
+build/
+coverage/
+*.log
+
+# Runtime downloads and release archives
+*.zip
+*.rar
+*.7z
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

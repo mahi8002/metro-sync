@@ -1,0 +1,22 @@
+{
+  "name": "nyc-transit-backend",
+  "version": "1.0.0",
+  "description": "NYC Transit Hub backend - MTA GTFS-RT decoder PoC",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node scripts/validateFrontend.cjs && node --check server.js && node --check services/routePlanningService.js && node --check services/mapService.js && node tests/achievements.test.cjs",
+    "fetch:static": "node scripts/fetchStaticData.mjs"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "axios": "^1.20.0",
+    "cors": "^2.8.6",
+    "csv-parser": "^3.2.1",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "gtfs-realtime-bindings": "^2.2.0",
+    "redis": "^6.3.0"
+  }
+}

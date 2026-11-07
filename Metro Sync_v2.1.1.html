@@ -22,12 +22,23 @@
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
 
+  <!-- Persistent journey achievements -->
+  <script src="achievements.js"></script>
+
   <style>
     body {
       margin: 0;
       padding: 0;
       background-color: #0f172a;
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    /* Keep all interface and status icons static for glanceable wayfinding. */
+    svg,
+    [data-lucide],
+    .animate-spin,
+    .animate-bounce,
+    .animate-pulse {
+      animation: none !important;
     }
     .leaflet-container {
       background-color: #0f172a !important;
@@ -154,6 +165,32 @@
       'S': '#808183'
     };
 
+    const displayRouteId = (routeId) => {
+      if (['FS', 'GS', 'H'].includes(routeId)) return 'S';
+      if (routeId === 'SI') return 'SIR';
+      return String(routeId || '?').replace(/X$/, '');
+    };
+
+    const formatEpochTime = (epochSeconds) => {
+      if (!epochSeconds) return '--:--';
+      return new Date(epochSeconds * 1000).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    };
+
+    // VS Code Live Server normally serves this file on port 5500 while the
+    // Express API runs on port 5000. Detect that local-development setup so
+    // API calls do not get sent to Live Server and return 404.
+    const API_BASE_URL = (() => {
+      const localHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
+      const isLocal = localHosts.includes(window.location.hostname);
+      if (window.location.protocol === 'file:') return 'http://localhost:5000';
+      if (isLocal && window.location.port !== '5000') return 'http://localhost:5000';
+      return '';
+    })();
+    const apiUrl = (path) => `${API_BASE_URL}${path}`;
+
     // MTA Line Badge Component (Supports Circle vs Express Diamond Badges)
     const LineBadge = ({ line, isExpress = false, size = "w-5 h-5 text-[10px]" }) => {
       const colorClass = MTA_LINE_COLORS[line] || 'bg-slate-700 text-white';
@@ -179,45 +216,197 @@
       );
     };
 
-    // Station Data
-    const STATIONS_DATA = {
-      'CPS': { id: 'CPS', mta_id: '125', name: '59 St - Columbus Circle', lines: ['1','A','B','C','D'], ada: true, lat: 40.7682, lng: -73.9819, borough: 'Manhattan' },
-      'TSQ': { id: 'TSQ', mta_id: '127', name: 'Times Sq - 42 St', lines: ['1','2','3','7','N','Q','R','W','S'], ada: true, lat: 40.7559, lng: -73.9871, borough: 'Manhattan' },
-      'HUDSON': { id: 'HUDSON', mta_id: '726', name: '34 St - Hudson Yards', lines: ['7'], ada: true, lat: 40.7554, lng: -74.0021, borough: 'Manhattan' },
-      'PENN': { id: 'PENN', mta_id: '128', name: '34 St - Penn Station', lines: ['1','2','3','A','C','E'], ada: true, lat: 40.7506, lng: -73.9935, borough: 'Manhattan' },
-      'HERALD': { id: 'HERALD', mta_id: 'D17', name: '34 St - Herald Sq', lines: ['B','D','F','M','N','Q','R','W'], ada: true, lat: 40.7497, lng: -73.9878, borough: 'Manhattan' },
-      'GCT': { id: 'GCT', mta_id: '631', name: 'Grand Central - 42 St', lines: ['4','5','6','7','S'], ada: true, lat: 40.7527, lng: -73.9772, borough: 'Manhattan' },
-      'UNION': { id: 'UNION', mta_id: '635', name: '14 St - Union Sq', lines: ['4','5','6','L','N','Q','R','W'], ada: true, lat: 40.7359, lng: -73.9905, borough: 'Manhattan' },
-      'WTC': { id: 'WTC', mta_id: 'E01', name: 'World Trade Center / Cortlandt', lines: ['1','E','N','R','W'], ada: true, lat: 40.7115, lng: -74.0125, borough: 'Manhattan' },
-      'FULTON': { id: 'FULTON', mta_id: '229', name: 'Fulton St', lines: ['2','3','4','5','A','C','J','Z'], ada: true, lat: 40.7103, lng: -74.0090, borough: 'Manhattan' },
-      'BARC': { id: 'BARC', mta_id: '235', name: 'Atlantic Av - Barclays Ctr', lines: ['2','3','4','5','B','D','N','Q','R'], ada: true, lat: 40.6839, lng: -73.9788, borough: 'Brooklyn' }
+    const normalizeStationSearch = (value) =>
+      String(value || '')
+        .toLowerCase()
+        .replace(/\bsquare\b/g, 'sq')
+        .replace(/\bstreet\b/g, 'st')
+        .replace(/\bavenue\b/g, 'av')
+        .replace(/\bcenter\b/g, 'ctr')
+        .replace(/\bsaint\b/g, 'st')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]/g, '');
+
+    const stationSearchScore = (station, query) => {
+      const normalizedQuery = normalizeStationSearch(query);
+      const stationName = normalizeStationSearch(station.name);
+      const stationId = normalizeStationSearch(station.id);
+      if (!normalizedQuery) return 0;
+      if (stationId === normalizedQuery || stationName === normalizedQuery) return 0;
+      if (stationId.startsWith(normalizedQuery)) return 2;
+      if (stationName.startsWith(normalizedQuery)) return 4;
+      const substringIndex = stationName.indexOf(normalizedQuery);
+      if (substringIndex >= 0) return 10 + substringIndex / 1000;
+
+      let queryIndex = 0;
+      let gaps = 0;
+      let lastMatch = -1;
+      for (let index = 0; index < stationName.length; index++) {
+        if (stationName[index] !== normalizedQuery[queryIndex]) continue;
+        if (lastMatch >= 0) gaps += index - lastMatch - 1;
+        lastMatch = index;
+        queryIndex++;
+        if (queryIndex === normalizedQuery.length) return 30 + gaps;
+      }
+      return Number.POSITIVE_INFINITY;
+    };
+
+    const StationSearch = ({ id, label, value, stations, onChange, placeholder, t }) => {
+      const selectedStation = stations.find((station) => station.id === value);
+      const [query, setQuery] = useState(selectedStation?.name || '');
+      const [isOpen, setIsOpen] = useState(false);
+      const [activeIndex, setActiveIndex] = useState(0);
+      const blurTimerRef = useRef(null);
+
+      useEffect(() => {
+        setQuery(selectedStation?.name || '');
+      }, [value, selectedStation?.name]);
+
+      const results = useMemo(() => {
+        const showAll =
+          normalizeStationSearch(query) ===
+          normalizeStationSearch(selectedStation?.name || '');
+        const ranked = stations
+          .map((station) => ({
+            station,
+            score: showAll ? 0 : stationSearchScore(station, query)
+          }))
+          .filter((item) => Number.isFinite(item.score))
+          .sort(
+            (a, b) =>
+              a.score - b.score || a.station.name.localeCompare(b.station.name)
+          )
+          .slice(0, 12)
+          .map((item) => item.station);
+        return ranked;
+      }, [stations, query, selectedStation?.name]);
+
+      const chooseStation = (station) => {
+        onChange(station.id);
+        setQuery(station.name);
+        setActiveIndex(0);
+        setIsOpen(false);
+      };
+
+      const handleKeyDown = (event) => {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setIsOpen(true);
+          setActiveIndex((current) => Math.min(current + 1, Math.max(0, results.length - 1)));
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setActiveIndex((current) => Math.max(current - 1, 0));
+        } else if (event.key === 'Enter' && isOpen && results[activeIndex]) {
+          event.preventDefault();
+          chooseStation(results[activeIndex]);
+        } else if (event.key === 'Escape') {
+          setIsOpen(false);
+          setQuery(selectedStation?.name || '');
+        }
+      };
+
+      return (
+        <div>
+          <label htmlFor={id} className="block text-slate-400 font-semibold mb-1">{label}</label>
+          <div className="relative">
+            <Icon name="search" className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              id={id}
+              type="text"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={isOpen}
+              aria-controls={`${id}-results`}
+              autoComplete="off"
+              value={query}
+              placeholder={placeholder}
+              onFocus={() => {
+                clearTimeout(blurTimerRef.current);
+                setIsOpen(true);
+                setActiveIndex(0);
+              }}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setIsOpen(true);
+                setActiveIndex(0);
+              }}
+              onBlur={() => {
+                blurTimerRef.current = setTimeout(() => {
+                  setIsOpen(false);
+                  setQuery(selectedStation?.name || '');
+                }, 150);
+              }}
+              onKeyDown={handleKeyDown}
+              className="w-full p-2.5 pl-9 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
+            />
+            {isOpen && (
+              <div
+                id={`${id}-results`}
+                role="listbox"
+                className="absolute z-30 mt-1 w-full max-h-64 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 shadow-2xl"
+              >
+                {results.length === 0 ? (
+                  <p className="p-3 text-xs text-slate-500">{t('noMatchingStations')}</p>
+                ) : results.map((station, index) => (
+                  <button
+                    key={`${id}-${station.id}`}
+                    type="button"
+                    role="option"
+                    aria-selected={station.id === value}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => chooseStation(station)}
+                    onMouseEnter={() => setActiveIndex(index)}
+                    className={`w-full text-left px-3 py-2 border-b last:border-b-0 border-slate-800 ${
+                      index === activeIndex ? 'bg-blue-600/25 text-white' : 'text-slate-300 hover:bg-slate-900'
+                    }`}
+                  >
+                    <span className="block text-xs font-semibold">{station.name}</span>
+                    <span className="block text-[10px] text-slate-500 font-mono">
+                      {station.lines?.join(' · ') || station.id}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // Initial station data keeps the UI usable while /api/v1/stations loads.
+    // IDs below are GTFS parent-station IDs, not direction-specific platforms.
+    const STATIONS_FALLBACK = {
+      '125': { id: '125', name: '59 St-Columbus Circle', lines: ['1','A','B','C','D'], lat: 40.768247, lng: -73.981929, borough: 'Manhattan' },
+      '127': { id: '127', name: 'Times Sq-42 St', lines: ['1','2','3'], lat: 40.755290, lng: -73.987495, borough: 'Manhattan' },
+      '726': { id: '726', name: '34 St-Hudson Yards', lines: ['7'], lat: 40.755882, lng: -74.001910, borough: 'Manhattan' },
+      '128': { id: '128', name: '34 St-Penn Station', lines: ['1','2','3'], lat: 40.750373, lng: -73.991057, borough: 'Manhattan' },
+      'D17': { id: 'D17', name: '34 St-Herald Sq', lines: ['B','D','F','M'], lat: 40.749719, lng: -73.987823, borough: 'Manhattan' },
+      '631': { id: '631', name: 'Grand Central-42 St', lines: ['4','5','6'], lat: 40.751776, lng: -73.976848, borough: 'Manhattan' },
+      '635': { id: '635', name: '14 St-Union Sq', lines: ['4','5','6'], lat: 40.734673, lng: -73.989951, borough: 'Manhattan' },
+      'E01': { id: 'E01', name: 'World Trade Center', lines: ['E'], lat: 40.712582, lng: -74.009781, borough: 'Manhattan' },
+      '229': { id: '229', name: 'Fulton St', lines: ['2','3','4','5'], lat: 40.709416, lng: -74.006571, borough: 'Manhattan' },
+      '235': { id: '235', name: 'Atlantic Av-Barclays Ctr', lines: ['2','3','4','5'], lat: 40.684359, lng: -73.977666, borough: 'Brooklyn' }
     };
 
     // Nearby Places Database
     const YELP_VENUES_DATABASE = {
-      'TSQ': [
+      '127': [
         { id: 'v1', name: 'Joe\'s Pizza Times Square', category: 'dining', rating: 4.8, reviews: 3420, price: '$', distance: '2 min walk', image: '🍕', text: 'Classic NYC thin-crust cheese slice staple.' },
         { id: 'v2', name: 'Culture Espresso', category: 'coffee', rating: 4.9, reviews: 1210, price: '$', distance: '4 min walk', image: '☕', text: 'Famous chocolate chip cookies & craft coffee.' }
       ],
-      'GCT': [
+      '631': [
         { id: 'v3', name: 'Grand Central Oyster Bar', category: 'dining', rating: 4.5, reviews: 2150, price: '$$$', distance: '1 min walk', image: '🦪', text: 'Historic seafood landmark inside GCT station.' },
         { id: 'v4', name: 'Bryant Park Reading Room', category: 'arts', rating: 4.9, reviews: 890, price: 'Free', distance: '5 min walk', image: '🌳', text: 'Outdoor relaxation & chess games near 42nd St.' }
       ],
-      'UNION': [
+      '635': [
         { id: 'v5', name: 'Union Square Greenmarket', category: 'shopping', rating: 4.8, reviews: 1840, price: '$$', distance: '1 min walk', image: '🍎', text: 'Fresh local produce, bakery, and cider artisan stalls.' }
       ],
-      'BARC': [
+      '235': [
         { id: 'v6', name: 'Barclays Center Arena', category: 'arts', rating: 4.8, reviews: 4100, price: '$$$', distance: '1 min walk', image: '🏀', text: 'Brooklyn Nets, NY Liberty, and major concerts.' },
         { id: 'v7', name: 'Junior\'s Restaurant Brooklyn', category: 'dining', rating: 4.6, reviews: 2900, price: '$$', distance: '8 min walk', image: '🍰', text: 'World-famous iconic Brooklyn cheesecake.' }
       ]
     };
-
-    // Service Alerts Demo Data
-    const INITIAL_GTFS_ALERTS = [
-      { id: 'gtfs-1', line: '7', isExpress: true, severity: 'warning', title: 'Flushing Line Delays', desc: 'Signal work at Queensboro Plaza is causing 5 to 8 minute delays.' },
-      { id: 'gtfs-2', line: 'A', isExpress: true, severity: 'info', title: 'Express Service Active', desc: 'A trains are running express in both directions in Manhattan.' },
-      { id: 'gtfs-3', line: 'L', isExpress: false, severity: 'warning', title: 'Planned Weekend Maintenance', desc: 'Trains share one track between 8 Av and 14 St-Union Sq.' }
-    ];
 
     // Elevator & Escalator Status Demo Data
     const INITIAL_ELEVATOR_OUTAGES = [
@@ -226,10 +415,10 @@
     ];
 
     // --- De-coupled Offline Assistant Engine Logic ---
-    const runOfflineAssistantQuery = (query, currentOrigin, currentDest) => {
+    const runOfflineAssistantQuery = (query, currentOrigin, currentDest, stationsData, currentRoutes) => {
       const q = query.toLowerCase().trim();
-      const originSt = STATIONS_DATA[currentOrigin];
-      const destSt = STATIONS_DATA[currentDest];
+      const originSt = stationsData[currentOrigin];
+      const destSt = stationsData[currentDest];
 
       if (q.includes("step-free") || q.includes("elevator") || q.includes("wheelchair") || q.includes("ada") || q.includes("accessible")) {
         const origAda = originSt?.ada ? "step-free accessible ♿" : "NOT step-free ⚠️";
@@ -240,69 +429,845 @@
         return `Live Transit Alerts: Line 7 Express has signal delays at Queensboro Plaza. Line L has single-track maintenance near Union Sq. Line A Express is operating express in Manhattan.`;
       }
       if (q.includes("food") || q.includes("coffee") || q.includes("pizza") || q.includes("eat") || q.includes("near") || q.includes("place")) {
-        const venues = YELP_VENUES_DATABASE[currentDest] || YELP_VENUES_DATABASE['TSQ'];
+        const venues = YELP_VENUES_DATABASE[currentDest] || YELP_VENUES_DATABASE['127'];
         const top = venues[0];
         return `Top recommendation near ${destSt?.name || 'destination'}: ${top.name} (${top.image} ${top.price}, ${top.distance}) - ${top.text}`;
       }
       if (q.includes("transfer") || q.includes("route") || q.includes("fast") || q.includes("how to get")) {
-        return `Commute Guidance: To travel from ${originSt?.name} to ${destSt?.name}, the fastest route takes ~18 mins via N/Q express lines. Select Option 2 for 100% elevator-accessible routing.`;
+        const fastest = currentRoutes?.[0];
+        if (fastest) {
+          return `Commute Guidance: ${originSt?.name} to ${destSt?.name} takes about ${fastest.duration} minutes on ${fastest.lines.join('/')}, including about ${fastest.walkingMinutes} minutes of station walking.`;
+        }
+        return `Commute Guidance: Select an origin and destination to calculate a route from the live station graph.`;
       }
       return `Subterranean Assistant (Offline Mode): I can answer questions instantly about elevator accessibility, current subway line delays, fastest transfer options, or nearby food at ${destSt?.name}.`;
     };
 
-    // 👇 插入这段代码 👇
-    class PriorityQueue {
-      constructor() { this.values = []; }
-      enqueue(val, priority) { this.values.push({ val, priority }); this.sort(); }
-      dequeue() { return this.values.shift(); }
-      sort() { this.values.sort((a, b) => a.priority - b.priority); }
-      isEmpty() { return this.values.length === 0; }
-    }
+    const LANGUAGE_OPTIONS = [
+      { code: 'en', label: 'English' },
+      { code: 'es', label: 'Español' },
+      { code: 'zh-CN', label: '简体中文' },
+      { code: 'zh-TW', label: '繁體中文' },
+      { code: 'ru', label: 'Русский' },
+      { code: 'ht', label: 'Kreyòl Ayisyen' }
+    ];
 
-    const findShortestPath = (graph, startNode, endNode) => {
-      const distances = {}; const previous = {}; const pq = new PriorityQueue();
-      Object.keys(graph).forEach(node => {
-        distances[node] = node === startNode ? 0 : Infinity; previous[node] = null;
+    const TRANSLATIONS = {
+      en: {
+        liveUpdates: 'Live Updates',
+        subtitle: 'Accessible Commuter Wayfinding',
+        standardMode: 'Standard Mode',
+        highContrast: 'High Contrast',
+        mapRoutes: 'Map & Routes',
+        profileFavorites: 'Profile & Favorites',
+        signOut: 'Sign Out',
+        signInRegister: 'Sign In / Register',
+        profileSuffix: "{name}'s Profile",
+        guestProfile: 'Guest Profile',
+        demoMode: 'Local Demo Mode • Sign in to sync saved routes',
+        totalRides: 'Total Rides',
+        co2Saved: 'CO₂ Saved',
+        savedRoutesTitle: 'Saved Favorite Routes',
+        savedRoutesDesc: 'Manage saved routes or load them directly onto the map',
+        savedCount: '{count} saved',
+        noSavedRoutes: 'No saved routes yet. Use "Bookmark Route" on any calculated route on the map!',
+        routeNamePlaceholder: 'Enter route name...',
+        save: 'Save',
+        mins: 'mins',
+        showOnMap: 'Show on Map',
+        deleteRoute: 'Delete Route',
+        renameRoute: 'Rename Route',
+        languageTitle: 'Language & Region',
+        languageDesc: 'Choose the language used throughout the interface.',
+        interfaceLanguage: 'Interface language',
+        saveLanguage: 'Save Language',
+        languageSaved: 'Language preference saved',
+        commuterPreferences: 'Commuter Preferences',
+        preferStepFree: 'Prefer Step-Free Accessible Elevators',
+        outageNotifications: 'Elevator Outage Notifications',
+        routeFinder: 'NYC Route Finder',
+        startStation: 'Start Station',
+        destinationStation: 'Destination Station',
+        searchStart: 'Search a starting station...',
+        searchDestination: 'Search a destination station...',
+        noMatchingStations: 'No matching stations',
+        calculatingRoutes: 'Calculating routes across all {count} parent stations...',
+        fastestRoute: 'Fastest Route',
+        alternativeRoute: 'Alternative Route {number}',
+        transferCount: '{count} transfer(s)',
+        accessible: 'Accessible',
+        rideRoute: 'Ride {line} from {from} to {to} ({minutes} min, {stops} stops)',
+        transferWalk: 'Transfer from {from} to {to} ({minutes} min walk)',
+        arriveAt: 'Arrive at {station}',
+        logTrip: 'Log Trip (+1.8kg CO₂)',
+        bookmarkRoute: 'Bookmark Route',
+        routeSaved: 'Route saved to Favorites',
+        routeRemoved: 'Route removed from favorites',
+        tripLogged: 'Trip logged! Saved +1.8kg CO₂!',
+        placesNear: 'Places Near {station}',
+        interactiveMap: 'Interactive Transit Map',
+        stationListView: 'Station List View',
+        mapView: 'Show Map View',
+        liveTrainUpdates: 'Live Train Updates',
+        trips: '{count} trips',
+        waitingLive: 'Waiting for an MTA GTFS-Realtime update...',
+        updatedAt: 'Updated {time}',
+        trip: 'Trip {id}',
+        elevatorUpdates: 'Elevator & Escalator Updates',
+        noOutages: 'No active outages reported.',
+        offlineAssistant: 'Offline Assistant',
+        transitAssistant: 'NYC Transit Assistant',
+        onlineSync: 'Online Sync',
+        offlineMode: 'Underground Offline Mode',
+        stepFreeAccess: 'Step-free access?',
+        checkDelays: 'Check line delays',
+        nearbyFood: 'Nearby food',
+        askAssistant: 'Ask assistant underground...',
+        signInTitle: 'Sign In to Transit Hub',
+        signUpTitle: 'Create Commuter Account',
+        forgotTitle: 'Reset Password',
+        signInDesc: 'Access saved favorite routes and synchronized travel preferences',
+        signUpDesc: 'Create an account to back up your favorite MTA routes',
+        forgotDesc: 'Enter your email to receive a password reset link',
+        emailAddress: 'Email Address',
+        password: 'Password',
+        signIn: 'Sign In',
+        createAccount: 'Create Account',
+        sendReset: 'Send Reset Email',
+        needAccount: 'Need an account? Register',
+        forgotPassword: 'Forgot password?',
+        backSignIn: 'Back to Sign In',
+        noRouteFound: 'No connected subway route was found between these stations.',
+        routeLoadFailed: 'Unable to load route information.',
+        liveUnavailable: 'Live train data is temporarily unavailable.',
+        outagesUnavailable: 'Accessibility outage data is temporarily unavailable.'
+      },
+      es: {
+        liveUpdates: 'En vivo',
+        subtitle: 'Orientación accesible para viajeros',
+        standardMode: 'Modo estándar',
+        highContrast: 'Alto contraste',
+        mapRoutes: 'Mapa y rutas',
+        profileFavorites: 'Perfil y favoritos',
+        signOut: 'Cerrar sesión',
+        signInRegister: 'Iniciar sesión / Registrarse',
+        profileSuffix: 'Perfil de {name}',
+        guestProfile: 'Perfil de invitado',
+        demoMode: 'Modo demo local • Inicia sesión para sincronizar rutas',
+        totalRides: 'Viajes totales',
+        co2Saved: 'CO₂ ahorrado',
+        savedRoutesTitle: 'Rutas favoritas guardadas',
+        savedRoutesDesc: 'Gestiona o carga tus rutas directamente en el mapa',
+        savedCount: '{count} guardadas',
+        noSavedRoutes: 'Aún no hay rutas guardadas. Usa "Guardar ruta" en una ruta calculada.',
+        routeNamePlaceholder: 'Nombre de la ruta...',
+        save: 'Guardar',
+        mins: 'min',
+        showOnMap: 'Ver en el mapa',
+        deleteRoute: 'Eliminar ruta',
+        renameRoute: 'Renombrar ruta',
+        languageTitle: 'Idioma y región',
+        languageDesc: 'Elige el idioma de toda la interfaz.',
+        interfaceLanguage: 'Idioma de la interfaz',
+        saveLanguage: 'Guardar idioma',
+        languageSaved: 'Preferencia de idioma guardada',
+        commuterPreferences: 'Preferencias del viajero',
+        preferStepFree: 'Preferir acceso sin escaleras',
+        outageNotifications: 'Avisos de ascensores fuera de servicio',
+        routeFinder: 'Buscador de rutas de Nueva York',
+        startStation: 'Estación de origen',
+        destinationStation: 'Estación de destino',
+        searchStart: 'Buscar estación de origen...',
+        searchDestination: 'Buscar estación de destino...',
+        noMatchingStations: 'No hay estaciones coincidentes',
+        calculatingRoutes: 'Calculando rutas entre {count} estaciones...',
+        fastestRoute: 'Ruta más rápida',
+        alternativeRoute: 'Ruta alternativa {number}',
+        transferCount: '{count} transbordo(s)',
+        accessible: 'Accesible',
+        rideRoute: 'Toma {line} de {from} a {to} ({minutes} min, {stops} paradas)',
+        transferWalk: 'Transborda de {from} a {to} ({minutes} min a pie)',
+        arriveAt: 'Llega a {station}',
+        logTrip: 'Registrar viaje (+1.8kg CO₂)',
+        bookmarkRoute: 'Guardar ruta',
+        routeSaved: 'Ruta guardada en favoritos',
+        routeRemoved: 'Ruta eliminada de favoritos',
+        tripLogged: 'Viaje registrado. ¡Ahorraste +1.8kg CO₂!',
+        placesNear: 'Lugares cerca de {station}',
+        interactiveMap: 'Mapa interactivo de tránsito',
+        stationListView: 'Vista de estaciones',
+        mapView: 'Ver mapa',
+        liveTrainUpdates: 'Trenes en tiempo real',
+        trips: '{count} viajes',
+        waitingLive: 'Esperando datos GTFS-Realtime de la MTA...',
+        updatedAt: 'Actualizado {time}',
+        trip: 'Viaje {id}',
+        elevatorUpdates: 'Estado de ascensores y escaleras',
+        noOutages: 'No hay averías activas.',
+        offlineAssistant: 'Asistente sin conexión',
+        transitAssistant: 'Asistente de tránsito',
+        onlineSync: 'Sincronización en línea',
+        offlineMode: 'Modo subterráneo sin conexión',
+        stepFreeAccess: '¿Acceso sin escaleras?',
+        checkDelays: 'Consultar retrasos',
+        nearbyFood: 'Comida cercana',
+        askAssistant: 'Pregunta al asistente...',
+        signInTitle: 'Iniciar sesión en Transit Hub',
+        signUpTitle: 'Crear cuenta de viajero',
+        forgotTitle: 'Restablecer contraseña',
+        signInDesc: 'Accede a tus rutas favoritas y preferencias sincronizadas',
+        signUpDesc: 'Crea una cuenta para guardar tus rutas de la MTA',
+        forgotDesc: 'Introduce tu correo para recibir un enlace de restablecimiento',
+        emailAddress: 'Correo electrónico',
+        password: 'Contraseña',
+        signIn: 'Iniciar sesión',
+        createAccount: 'Crear cuenta',
+        sendReset: 'Enviar correo',
+        needAccount: '¿Necesitas una cuenta? Regístrate',
+        forgotPassword: '¿Olvidaste tu contraseña?',
+        backSignIn: 'Volver a iniciar sesión',
+        noRouteFound: 'No se encontró una ruta conectada entre estas estaciones.',
+        routeLoadFailed: 'No se pudo cargar la ruta.',
+        liveUnavailable: 'Los datos de trenes no están disponibles temporalmente.',
+        outagesUnavailable: 'Los datos de accesibilidad no están disponibles temporalmente.'
+      },
+      'zh-CN': {
+        liveUpdates: '实时更新',
+        subtitle: '无障碍通勤导航',
+        standardMode: '标准模式',
+        highContrast: '高对比度',
+        mapRoutes: '地图与路线',
+        profileFavorites: '个人资料与收藏',
+        signOut: '退出登录',
+        signInRegister: '登录 / 注册',
+        profileSuffix: '{name} 的个人资料',
+        guestProfile: '访客资料',
+        demoMode: '本地演示模式 • 登录后可同步收藏路线',
+        totalRides: '总出行次数',
+        co2Saved: '减少碳排放',
+        savedRoutesTitle: '已收藏路线',
+        savedRoutesDesc: '管理收藏路线，或直接在地图中载入',
+        savedCount: '已收藏 {count} 条',
+        noSavedRoutes: '暂无收藏路线。可在任意计算出的路线上点击“收藏路线”。',
+        routeNamePlaceholder: '输入路线名称...',
+        save: '保存',
+        mins: '分钟',
+        showOnMap: '在地图中查看',
+        deleteRoute: '删除路线',
+        renameRoute: '重命名路线',
+        languageTitle: '语言与地区',
+        languageDesc: '选择整个网页界面使用的语言。',
+        interfaceLanguage: '界面语言',
+        saveLanguage: '保存语言',
+        languageSaved: '语言偏好已保存',
+        commuterPreferences: '通勤偏好',
+        preferStepFree: '优先选择无台阶无障碍电梯',
+        outageNotifications: '电梯故障通知',
+        routeFinder: '纽约路线搜索',
+        startStation: '起点站',
+        destinationStation: '终点站',
+        searchStart: '搜索起点站...',
+        searchDestination: '搜索终点站...',
+        noMatchingStations: '没有匹配的车站',
+        calculatingRoutes: '正在 {count} 个父站中计算路线...',
+        fastestRoute: '最快路线',
+        alternativeRoute: '备选路线 {number}',
+        transferCount: '{count} 次换乘',
+        accessible: '无障碍',
+        rideRoute: '乘坐 {line}，从 {from} 到 {to}（{minutes} 分钟，{stops} 站）',
+        transferWalk: '从 {from} 步行换乘至 {to}（{minutes} 分钟）',
+        arriveAt: '到达 {station}',
+        logTrip: '记录行程（减少 1.8kg CO₂）',
+        bookmarkRoute: '收藏路线',
+        routeSaved: '路线已加入收藏',
+        routeRemoved: '路线已从收藏中删除',
+        tripLogged: '行程已记录！减少 1.8kg CO₂！',
+        placesNear: '{station} 附近地点',
+        interactiveMap: '交互式交通地图',
+        stationListView: '车站列表',
+        mapView: '显示地图',
+        liveTrainUpdates: '实时列车更新',
+        trips: '{count} 个班次',
+        waitingLive: '正在等待 MTA 实时数据...',
+        updatedAt: '更新于 {time}',
+        trip: '班次 {id}',
+        elevatorUpdates: '电梯与扶梯状态',
+        noOutages: '当前没有设备故障。',
+        offlineAssistant: '离线助手',
+        transitAssistant: '纽约交通助手',
+        onlineSync: '在线同步',
+        offlineMode: '地下离线模式',
+        stepFreeAccess: '无障碍通行？',
+        checkDelays: '查看线路延误',
+        nearbyFood: '附近餐饮',
+        askAssistant: '向助手提问...',
+        signInTitle: '登录 Transit Hub',
+        signUpTitle: '创建通勤账户',
+        forgotTitle: '重置密码',
+        signInDesc: '访问收藏路线和同步的出行偏好',
+        signUpDesc: '创建账户以备份常用 MTA 路线',
+        forgotDesc: '输入邮箱以接收密码重置链接',
+        emailAddress: '电子邮箱',
+        password: '密码',
+        signIn: '登录',
+        createAccount: '创建账户',
+        sendReset: '发送重置邮件',
+        needAccount: '没有账户？注册',
+        forgotPassword: '忘记密码？',
+        backSignIn: '返回登录',
+        noRouteFound: '这些车站之间没有可计算的地铁路线。',
+        routeLoadFailed: '无法加载路线信息。',
+        liveUnavailable: '实时列车数据暂时不可用。',
+        outagesUnavailable: '无障碍故障数据暂时不可用。'
+      },
+      'zh-TW': {
+        liveUpdates: '即時更新',
+        subtitle: '無障礙通勤導航',
+        standardMode: '標準模式',
+        highContrast: '高對比度',
+        mapRoutes: '地圖與路線',
+        profileFavorites: '個人資料與收藏',
+        signOut: '登出',
+        signInRegister: '登入 / 註冊',
+        profileSuffix: '{name} 的個人資料',
+        guestProfile: '訪客資料',
+        demoMode: '本機示範模式 • 登入後可同步收藏路線',
+        totalRides: '總出行次數',
+        co2Saved: '減少碳排放',
+        savedRoutesTitle: '已收藏路線',
+        savedRoutesDesc: '管理收藏路線，或直接在地圖中載入',
+        savedCount: '已收藏 {count} 條',
+        noSavedRoutes: '尚無收藏路線。可在任意計算出的路線上點選「收藏路線」。',
+        routeNamePlaceholder: '輸入路線名稱...',
+        save: '儲存',
+        mins: '分鐘',
+        showOnMap: '在地圖中查看',
+        deleteRoute: '刪除路線',
+        renameRoute: '重新命名路線',
+        languageTitle: '語言與地區',
+        languageDesc: '選擇整個網頁介面使用的語言。',
+        interfaceLanguage: '介面語言',
+        saveLanguage: '儲存語言',
+        languageSaved: '語言偏好已儲存',
+        commuterPreferences: '通勤偏好',
+        preferStepFree: '優先選擇無階梯無障礙電梯',
+        outageNotifications: '電梯故障通知',
+        routeFinder: '紐約路線搜尋',
+        startStation: '起點站',
+        destinationStation: '終點站',
+        searchStart: '搜尋起點站...',
+        searchDestination: '搜尋終點站...',
+        noMatchingStations: '沒有符合的車站',
+        calculatingRoutes: '正在 {count} 個父站中計算路線...',
+        fastestRoute: '最快路線',
+        alternativeRoute: '替代路線 {number}',
+        transferCount: '{count} 次轉乘',
+        accessible: '無障礙',
+        rideRoute: '搭乘 {line}，從 {from} 到 {to}（{minutes} 分鐘，{stops} 站）',
+        transferWalk: '從 {from} 步行轉乘至 {to}（{minutes} 分鐘）',
+        arriveAt: '抵達 {station}',
+        logTrip: '記錄行程（減少 1.8kg CO₂）',
+        bookmarkRoute: '收藏路線',
+        routeSaved: '路線已加入收藏',
+        routeRemoved: '路線已從收藏中刪除',
+        tripLogged: '行程已記錄！減少 1.8kg CO₂！',
+        placesNear: '{station} 附近地點',
+        interactiveMap: '互動式交通地圖',
+        stationListView: '車站列表',
+        mapView: '顯示地圖',
+        liveTrainUpdates: '即時列車更新',
+        trips: '{count} 個班次',
+        waitingLive: '正在等待 MTA 即時資料...',
+        updatedAt: '更新於 {time}',
+        trip: '班次 {id}',
+        elevatorUpdates: '電梯與扶梯狀態',
+        noOutages: '目前沒有設備故障。',
+        offlineAssistant: '離線助理',
+        transitAssistant: '紐約交通助理',
+        onlineSync: '線上同步',
+        offlineMode: '地下離線模式',
+        stepFreeAccess: '無障礙通行？',
+        checkDelays: '查看路線延誤',
+        nearbyFood: '附近餐飲',
+        askAssistant: '向助理提問...',
+        signInTitle: '登入 Transit Hub',
+        signUpTitle: '建立通勤帳戶',
+        forgotTitle: '重設密碼',
+        signInDesc: '存取收藏路線和同步的出行偏好',
+        signUpDesc: '建立帳戶以備份常用 MTA 路線',
+        forgotDesc: '輸入電子郵件以接收密碼重設連結',
+        emailAddress: '電子郵件',
+        password: '密碼',
+        signIn: '登入',
+        createAccount: '建立帳戶',
+        sendReset: '傳送重設郵件',
+        needAccount: '沒有帳戶？註冊',
+        forgotPassword: '忘記密碼？',
+        backSignIn: '返回登入',
+        noRouteFound: '這些車站之間沒有可計算的地鐵路線。',
+        routeLoadFailed: '無法載入路線資訊。',
+        liveUnavailable: '即時列車資料暫時無法使用。',
+        outagesUnavailable: '無障礙故障資料暫時無法使用。'
+      },
+      ru: {
+        liveUpdates: 'В реальном времени',
+        subtitle: 'Доступная навигация для пассажиров',
+        standardMode: 'Стандартный режим',
+        highContrast: 'Высокий контраст',
+        mapRoutes: 'Карта и маршруты',
+        profileFavorites: 'Профиль и избранное',
+        signOut: 'Выйти',
+        signInRegister: 'Вход / Регистрация',
+        profileSuffix: 'Профиль {name}',
+        guestProfile: 'Профиль гостя',
+        demoMode: 'Локальный демо-режим • Войдите для синхронизации',
+        totalRides: 'Всего поездок',
+        co2Saved: 'Сэкономлено CO₂',
+        savedRoutesTitle: 'Сохранённые маршруты',
+        savedRoutesDesc: 'Управляйте маршрутами или открывайте их на карте',
+        savedCount: 'Сохранено: {count}',
+        noSavedRoutes: 'Сохранённых маршрутов пока нет. Используйте «Сохранить маршрут».',
+        routeNamePlaceholder: 'Название маршрута...',
+        save: 'Сохранить',
+        mins: 'мин',
+        showOnMap: 'Показать на карте',
+        deleteRoute: 'Удалить маршрут',
+        renameRoute: 'Переименовать',
+        languageTitle: 'Язык и регион',
+        languageDesc: 'Выберите язык интерфейса.',
+        interfaceLanguage: 'Язык интерфейса',
+        saveLanguage: 'Сохранить язык',
+        languageSaved: 'Язык сохранён',
+        commuterPreferences: 'Настройки поездок',
+        preferStepFree: 'Предпочитать доступ без лестниц',
+        outageNotifications: 'Уведомления о неисправности лифтов',
+        routeFinder: 'Поиск маршрута по Нью-Йорку',
+        startStation: 'Начальная станция',
+        destinationStation: 'Станция назначения',
+        searchStart: 'Найти начальную станцию...',
+        searchDestination: 'Найти станцию назначения...',
+        noMatchingStations: 'Станции не найдены',
+        calculatingRoutes: 'Расчёт маршрутов по {count} станциям...',
+        fastestRoute: 'Самый быстрый маршрут',
+        alternativeRoute: 'Альтернативный маршрут {number}',
+        transferCount: 'Пересадок: {count}',
+        accessible: 'Доступный',
+        rideRoute: '{line}: {from} → {to} ({minutes} мин, остановок: {stops})',
+        transferWalk: 'Переход {from} → {to} ({minutes} мин пешком)',
+        arriveAt: 'Прибытие: {station}',
+        logTrip: 'Записать поездку (+1.8kg CO₂)',
+        bookmarkRoute: 'Сохранить маршрут',
+        routeSaved: 'Маршрут добавлен в избранное',
+        routeRemoved: 'Маршрут удалён из избранного',
+        tripLogged: 'Поездка записана! Сэкономлено +1.8kg CO₂!',
+        placesNear: 'Места рядом с {station}',
+        interactiveMap: 'Интерактивная карта транспорта',
+        stationListView: 'Список станций',
+        mapView: 'Показать карту',
+        liveTrainUpdates: 'Поезда в реальном времени',
+        trips: 'Поездок: {count}',
+        waitingLive: 'Ожидание данных MTA GTFS-Realtime...',
+        updatedAt: 'Обновлено {time}',
+        trip: 'Рейс {id}',
+        elevatorUpdates: 'Лифты и эскалаторы',
+        noOutages: 'Активных неисправностей нет.',
+        offlineAssistant: 'Офлайн-помощник',
+        transitAssistant: 'Транспортный помощник',
+        onlineSync: 'Онлайн-синхронизация',
+        offlineMode: 'Подземный офлайн-режим',
+        stepFreeAccess: 'Доступ без лестниц?',
+        checkDelays: 'Проверить задержки',
+        nearbyFood: 'Еда рядом',
+        askAssistant: 'Спросите помощника...',
+        signInTitle: 'Вход в Transit Hub',
+        signUpTitle: 'Создать аккаунт',
+        forgotTitle: 'Сбросить пароль',
+        signInDesc: 'Доступ к избранным маршрутам и настройкам',
+        signUpDesc: 'Создайте аккаунт для резервной копии маршрутов',
+        forgotDesc: 'Введите email для получения ссылки сброса пароля',
+        emailAddress: 'Электронная почта',
+        password: 'Пароль',
+        signIn: 'Войти',
+        createAccount: 'Создать аккаунт',
+        sendReset: 'Отправить письмо',
+        needAccount: 'Нет аккаунта? Зарегистрироваться',
+        forgotPassword: 'Забыли пароль?',
+        backSignIn: 'Вернуться ко входу',
+        noRouteFound: 'Между этими станциями нет связанного маршрута.',
+        routeLoadFailed: 'Не удалось загрузить маршрут.',
+        liveUnavailable: 'Данные поездов временно недоступны.',
+        outagesUnavailable: 'Данные о доступности временно недоступны.'
+      },
+      ht: {
+        liveUpdates: 'Nouvo an tan reyèl',
+        subtitle: 'Gid pou vwayajè ak aksè fasil',
+        standardMode: 'Mòd estanda',
+        highContrast: 'Kontras wo',
+        mapRoutes: 'Kat ak wout',
+        profileFavorites: 'Pwofil ak favori',
+        signOut: 'Dekonekte',
+        signInRegister: 'Konekte / Enskri',
+        profileSuffix: 'Pwofil {name}',
+        guestProfile: 'Pwofil envite',
+        demoMode: 'Mòd demo lokal • Konekte pou senkronize wout yo',
+        totalRides: 'Total vwayaj',
+        co2Saved: 'CO₂ ekonomize',
+        savedRoutesTitle: 'Wout favori ki anrejistre',
+        savedRoutesDesc: 'Jere wout oswa louvri yo dirèkteman sou kat la',
+        savedCount: '{count} anrejistre',
+        noSavedRoutes: 'Pa gen wout ki anrejistre. Sèvi ak "Anrejistre wout" sou yon wout.',
+        routeNamePlaceholder: 'Non wout la...',
+        save: 'Anrejistre',
+        mins: 'min',
+        showOnMap: 'Montre sou kat',
+        deleteRoute: 'Efase wout',
+        renameRoute: 'Chanje non wout',
+        languageTitle: 'Lang ak rejyon',
+        languageDesc: 'Chwazi lang pou tout entèfas la.',
+        interfaceLanguage: 'Lang entèfas',
+        saveLanguage: 'Anrejistre lang',
+        languageSaved: 'Preferans lang anrejistre',
+        commuterPreferences: 'Preferans vwayaj',
+        preferStepFree: 'Prefere aksè san mach eskalye',
+        outageNotifications: 'Notifikasyon pann asansè',
+        routeFinder: 'Rechèch wout New York',
+        startStation: 'Estasyon depa',
+        destinationStation: 'Estasyon destinasyon',
+        searchStart: 'Chèche estasyon depa...',
+        searchDestination: 'Chèche estasyon destinasyon...',
+        noMatchingStations: 'Pa gen estasyon ki koresponn',
+        calculatingRoutes: 'Ap kalkile wout nan {count} estasyon...',
+        fastestRoute: 'Wout pi rapid',
+        alternativeRoute: 'Wout altènatif {number}',
+        transferCount: '{count} transpò',
+        accessible: 'Aksesib',
+        rideRoute: 'Pran {line} soti {from} pou ale {to} ({minutes} min, {stops} estasyon)',
+        transferWalk: 'Transfere soti {from} pou ale {to} ({minutes} min ap mache)',
+        arriveAt: 'Rive nan {station}',
+        logTrip: 'Anrejistre vwayaj (+1.8kg CO₂)',
+        bookmarkRoute: 'Anrejistre wout',
+        routeSaved: 'Wout anrejistre nan favori',
+        routeRemoved: 'Wout retire nan favori',
+        tripLogged: 'Vwayaj anrejistre! +1.8kg CO₂ ekonomize!',
+        placesNear: 'Kote ki toupre {station}',
+        interactiveMap: 'Kat entèaktif transpò',
+        stationListView: 'Lis estasyon',
+        mapView: 'Montre kat',
+        liveTrainUpdates: 'Tren an tan reyèl',
+        trips: '{count} vwayaj',
+        waitingLive: 'Ap tann done MTA GTFS-Realtime...',
+        updatedAt: 'Mizajou {time}',
+        trip: 'Vwayaj {id}',
+        elevatorUpdates: 'Estati asansè ak eskalye',
+        noOutages: 'Pa gen pann aktif.',
+        offlineAssistant: 'Asistan san entènèt',
+        transitAssistant: 'Asistan transpò',
+        onlineSync: 'Senkronizasyon anliy',
+        offlineMode: 'Mòd anba tè san entènèt',
+        stepFreeAccess: 'Aksè san mach eskalye?',
+        checkDelays: 'Tcheke reta liy yo',
+        nearbyFood: 'Manje ki toupre',
+        askAssistant: 'Mande asistan an...',
+        signInTitle: 'Konekte nan Transit Hub',
+        signUpTitle: 'Kreye kont vwayajè',
+        forgotTitle: 'Chanje modpas',
+        signInDesc: 'Jwenn wout favori ak preferans ou',
+        signUpDesc: 'Kreye yon kont pou sekirize wout MTA ou',
+        forgotDesc: 'Antre imèl ou pou resevwa yon lyen pou chanje modpas',
+        emailAddress: 'Adrès imèl',
+        password: 'Modpas',
+        signIn: 'Konekte',
+        createAccount: 'Kreye kont',
+        sendReset: 'Voye imèl',
+        needAccount: 'Pa gen kont? Enskri',
+        forgotPassword: 'Ou bliye modpas?',
+        backSignIn: 'Retounen pou konekte',
+        noRouteFound: 'Pa gen yon wout metro ki konekte ant estasyon sa yo.',
+        routeLoadFailed: 'Pa kapab chaje enfòmasyon wout la.',
+        liveUnavailable: 'Done tren yo pa disponib kounye a.',
+        outagesUnavailable: 'Done aksè yo pa disponib kounye a.'
+      }
+    };
+
+    const FEATURE_TRANSLATIONS = {
+      en: {
+        achievementsTitle: 'Achievements',
+        achievementProgress: '{unlocked} of {total} unlocked',
+        achievement_first_trip_name: 'First Stop',
+        achievement_first_trip_desc: 'Complete your first journey',
+        achievement_five_trips_name: 'Commute Starter',
+        achievement_five_trips_desc: 'Complete 5 journeys',
+        achievement_twenty_trips_name: 'City Regular',
+        achievement_twenty_trips_desc: 'Complete 20 journeys',
+        achievement_five_stations_name: 'City Explorer',
+        achievement_five_stations_desc: 'Visit 5 different stations',
+        achievement_ten_stations_name: 'Station Collector',
+        achievement_ten_stations_desc: 'Visit 10 different stations',
+        achievement_first_favorite_name: 'My Commute',
+        achievement_first_favorite_desc: 'Bookmark your first route',
+        startJourney: 'Start Journey',
+        completeJourney: 'Complete Journey',
+        cancelJourney: 'Cancel',
+        journeyInProgress: 'Journey in progress',
+        achievementUnlocked: 'Achievement unlocked: {name}',
+        rememberMe: 'Remember me',
+        fullName: 'Full Name',
+        confirmPassword: 'Confirm Password',
+        passwordHint: 'Use at least 8 characters.',
+        validEmailRequired: 'Please enter a valid email address.',
+        passwordLength: 'Password must contain at least 8 characters.',
+        passwordsMismatch: 'The passwords do not match.',
+        nameRequired: 'Please enter your full name.',
+        resetSent: 'Password reset link sent to {email}',
+        welcomeUser: 'Welcome, {email}!',
+        signedOut: 'Signed out successfully.',
+        routeNameUpdated: 'Route name updated!',
+        routeLoaded: 'Loaded {name} on map!',
+        journeyStarted: 'Journey started. Complete it when you arrive.',
+        journeyCompleted: 'Journey completed and saved.'
+      },
+      es: {
+        achievementsTitle: 'Logros',
+        achievementProgress: '{unlocked} de {total} desbloqueados',
+        achievement_first_trip_name: 'Primera parada',
+        achievement_first_trip_desc: 'Completa tu primer viaje',
+        achievement_five_trips_name: 'Iniciante del trayecto',
+        achievement_five_trips_desc: 'Completa 5 viajes',
+        achievement_twenty_trips_name: 'Habitual de la ciudad',
+        achievement_twenty_trips_desc: 'Completa 20 viajes',
+        achievement_five_stations_name: 'Explorador urbano',
+        achievement_five_stations_desc: 'Visita 5 estaciones diferentes',
+        achievement_ten_stations_name: 'Coleccionista de estaciones',
+        achievement_ten_stations_desc: 'Visita 10 estaciones diferentes',
+        achievement_first_favorite_name: 'Mi trayecto',
+        achievement_first_favorite_desc: 'Guarda tu primera ruta',
+        startJourney: 'Iniciar viaje',
+        completeJourney: 'Completar viaje',
+        cancelJourney: 'Cancelar',
+        journeyInProgress: 'Viaje en curso',
+        achievementUnlocked: 'Logro desbloqueado: {name}',
+        rememberMe: 'Recordarme',
+        fullName: 'Nombre completo',
+        confirmPassword: 'Confirmar contraseña',
+        passwordHint: 'Usa al menos 8 caracteres.',
+        validEmailRequired: 'Introduce un correo electrónico válido.',
+        passwordLength: 'La contraseña debe tener al menos 8 caracteres.',
+        passwordsMismatch: 'Las contraseñas no coinciden.',
+        nameRequired: 'Introduce tu nombre completo.',
+        resetSent: 'Enlace de restablecimiento enviado a {email}',
+        welcomeUser: '¡Bienvenido, {email}!',
+        signedOut: 'Sesión cerrada correctamente.',
+        routeNameUpdated: '¡Nombre de ruta actualizado!',
+        routeLoaded: '¡{name} cargada en el mapa!',
+        journeyStarted: 'Viaje iniciado. Complétalo al llegar.',
+        journeyCompleted: 'Viaje completado y guardado.'
+      },
+      'zh-CN': {
+        achievementsTitle: '交通成就',
+        achievementProgress: '已解锁 {unlocked} / {total}',
+        achievement_first_trip_name: '第一次出发',
+        achievement_first_trip_desc: '完成第一次行程',
+        achievement_five_trips_name: '通勤新手',
+        achievement_five_trips_desc: '完成 5 次行程',
+        achievement_twenty_trips_name: '城市常客',
+        achievement_twenty_trips_desc: '完成 20 次行程',
+        achievement_five_stations_name: '城市探索者',
+        achievement_five_stations_desc: '到访 5 个不同车站',
+        achievement_ten_stations_name: '车站收藏家',
+        achievement_ten_stations_desc: '到访 10 个不同车站',
+        achievement_first_favorite_name: '我的通勤',
+        achievement_first_favorite_desc: '收藏第一条路线',
+        startJourney: '开始行程',
+        completeJourney: '完成行程',
+        cancelJourney: '取消',
+        journeyInProgress: '行程进行中',
+        achievementUnlocked: '成就已解锁：{name}',
+        rememberMe: '记住我',
+        fullName: '姓名',
+        confirmPassword: '确认密码',
+        passwordHint: '密码至少需要 8 个字符。',
+        validEmailRequired: '请输入有效的电子邮箱。',
+        passwordLength: '密码至少需要 8 个字符。',
+        passwordsMismatch: '两次输入的密码不一致。',
+        nameRequired: '请输入姓名。',
+        resetSent: '密码重置链接已发送至 {email}',
+        welcomeUser: '欢迎，{email}！',
+        signedOut: '已成功退出登录。',
+        routeNameUpdated: '路线名称已更新！',
+        routeLoaded: '已在地图中载入 {name}！',
+        journeyStarted: '行程已开始，抵达后请完成行程。',
+        journeyCompleted: '行程已完成并保存。'
+      },
+      'zh-TW': {
+        achievementsTitle: '交通成就',
+        achievementProgress: '已解鎖 {unlocked} / {total}',
+        achievement_first_trip_name: '第一次出發',
+        achievement_first_trip_desc: '完成第一次行程',
+        achievement_five_trips_name: '通勤新手',
+        achievement_five_trips_desc: '完成 5 次行程',
+        achievement_twenty_trips_name: '城市常客',
+        achievement_twenty_trips_desc: '完成 20 次行程',
+        achievement_five_stations_name: '城市探索者',
+        achievement_five_stations_desc: '到訪 5 個不同車站',
+        achievement_ten_stations_name: '車站收藏家',
+        achievement_ten_stations_desc: '到訪 10 個不同車站',
+        achievement_first_favorite_name: '我的通勤',
+        achievement_first_favorite_desc: '收藏第一條路線',
+        startJourney: '開始行程',
+        completeJourney: '完成行程',
+        cancelJourney: '取消',
+        journeyInProgress: '行程進行中',
+        achievementUnlocked: '成就已解鎖：{name}',
+        rememberMe: '記住我',
+        fullName: '姓名',
+        confirmPassword: '確認密碼',
+        passwordHint: '密碼至少需要 8 個字元。',
+        validEmailRequired: '請輸入有效的電子郵件。',
+        passwordLength: '密碼至少需要 8 個字元。',
+        passwordsMismatch: '兩次輸入的密碼不一致。',
+        nameRequired: '請輸入姓名。',
+        resetSent: '密碼重設連結已寄至 {email}',
+        welcomeUser: '歡迎，{email}！',
+        signedOut: '已成功登出。',
+        routeNameUpdated: '路線名稱已更新！',
+        routeLoaded: '已在地圖中載入 {name}！',
+        journeyStarted: '行程已開始，抵達後請完成行程。',
+        journeyCompleted: '行程已完成並儲存。'
+      },
+      ru: {
+        achievementsTitle: 'Достижения',
+        achievementProgress: 'Открыто {unlocked} из {total}',
+        achievement_first_trip_name: 'Первая остановка',
+        achievement_first_trip_desc: 'Завершите первую поездку',
+        achievement_five_trips_name: 'Начинающий пассажир',
+        achievement_five_trips_desc: 'Завершите 5 поездок',
+        achievement_twenty_trips_name: 'Городской житель',
+        achievement_twenty_trips_desc: 'Завершите 20 поездок',
+        achievement_five_stations_name: 'Городской исследователь',
+        achievement_five_stations_desc: 'Посетите 5 разных станций',
+        achievement_ten_stations_name: 'Коллекционер станций',
+        achievement_ten_stations_desc: 'Посетите 10 разных станций',
+        achievement_first_favorite_name: 'Мой маршрут',
+        achievement_first_favorite_desc: 'Сохраните первый маршрут',
+        startJourney: 'Начать поездку',
+        completeJourney: 'Завершить поездку',
+        cancelJourney: 'Отмена',
+        journeyInProgress: 'Поездка выполняется',
+        achievementUnlocked: 'Достижение открыто: {name}',
+        rememberMe: 'Запомнить меня',
+        fullName: 'Полное имя',
+        confirmPassword: 'Подтвердите пароль',
+        passwordHint: 'Используйте не менее 8 символов.',
+        validEmailRequired: 'Введите корректный адрес электронной почты.',
+        passwordLength: 'Пароль должен содержать не менее 8 символов.',
+        passwordsMismatch: 'Пароли не совпадают.',
+        nameRequired: 'Введите полное имя.',
+        resetSent: 'Ссылка для сброса пароля отправлена на {email}',
+        welcomeUser: 'Добро пожаловать, {email}!',
+        signedOut: 'Вы вышли из аккаунта.',
+        routeNameUpdated: 'Название маршрута обновлено!',
+        routeLoaded: 'Маршрут {name} открыт на карте!',
+        journeyStarted: 'Поездка началась. Завершите её по прибытии.',
+        journeyCompleted: 'Поездка завершена и сохранена.'
+      },
+      ht: {
+        achievementsTitle: 'Akòonplisman',
+        achievementProgress: '{unlocked} sou {total} debloke',
+        achievement_first_trip_name: 'Premye arè',
+        achievement_first_trip_desc: 'Fini premye vwayaj ou',
+        achievement_five_trips_name: 'Kòmansè vwayaj',
+        achievement_five_trips_desc: 'Fini 5 vwayaj',
+        achievement_twenty_trips_name: 'Abitye vil la',
+        achievement_twenty_trips_desc: 'Fini 20 vwayaj',
+        achievement_five_stations_name: 'Esploradè vil la',
+        achievement_five_stations_desc: 'Vizite 5 estasyon diferan',
+        achievement_ten_stations_name: 'Koleksyonè estasyon',
+        achievement_ten_stations_desc: 'Vizite 10 estasyon diferan',
+        achievement_first_favorite_name: 'Vwayaj mwen',
+        achievement_first_favorite_desc: 'Anrejistre premye wout ou',
+        startJourney: 'Kòmanse vwayaj',
+        completeJourney: 'Fini vwayaj',
+        cancelJourney: 'Anile',
+        journeyInProgress: 'Vwayaj ap fèt',
+        achievementUnlocked: 'Akòonplisman debloke: {name}',
+        rememberMe: 'Sonje mwen',
+        fullName: 'Non konplè',
+        confirmPassword: 'Konfime modpas',
+        passwordHint: 'Sèvi ak omwen 8 karaktè.',
+        validEmailRequired: 'Antre yon adrès imèl valab.',
+        passwordLength: 'Modpas la dwe gen omwen 8 karaktè.',
+        passwordsMismatch: 'Modpas yo pa menm.',
+        nameRequired: 'Antre non konplè ou.',
+        resetSent: 'Lyen pou chanje modpas voye nan {email}',
+        welcomeUser: 'Byenveni, {email}!',
+        signedOut: 'Ou dekonekte.',
+        routeNameUpdated: 'Non wout la mete ajou!',
+        routeLoaded: '{name} chaje sou kat la!',
+        journeyStarted: 'Vwayaj kòmanse. Fini li lè ou rive.',
+        journeyCompleted: 'Vwayaj fini epi anrejistre.'
+      }
+    };
+
+    const interpolate = (template, values = {}) =>
+      String(template).replace(/\{(\w+)\}/g, (_, key) =>
+        values[key] !== undefined ? values[key] : `{${key}}`
+      );
+
+    const LANGUAGE_STORAGE_KEY = 'nyc_transit_language';
+    const getSavedLanguage = () => {
+      try {
+        const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+        return LANGUAGE_OPTIONS.some((option) => option.code === saved) ? saved : 'en';
+      } catch (_error) {
+        return 'en';
+      }
+    };
+    const persistLanguage = (language) => {
+      try {
+        localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+      } catch (_error) {
+        // Storage may be blocked by browser tracking prevention. The current
+        // session still changes language, but it will not persist after reload.
+      }
+    };
+
+    const PREFERENCES_STORAGE_KEY = 'nyc_transit_preferences_v1';
+    const ACHIEVEMENTS_STORAGE_KEY = 'metro_sync_achievements_v1';
+    const SESSION_STORAGE_KEY = 'nyc_transit_session_v1';
+
+    const readStoredJson = (key, fallback) => {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (_error) {
+        return fallback;
+      }
+    };
+
+    const writeStoredJson = (key, value) => {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch (_error) {
+        // The current session remains usable when browser storage is blocked.
+      }
+    };
+
+    const getSavedPreferences = () =>
+      readStoredJson(PREFERENCES_STORAGE_KEY, {
+        preferStepFree: true,
+        notifyOutages: true,
+        maxTransfers: 2,
+        ecoGamification: true
       });
-      pq.enqueue(startNode, 0);
 
-      while (!pq.isEmpty()) {
-        const { val: current } = pq.dequeue();
-        if (current === endNode) break;
-        const neighbors = graph[current] || [];
-        neighbors.forEach(neighbor => {
-          const time = distances[current] + neighbor.time;
-          if (time < distances[neighbor.to]) {
-            distances[neighbor.to] = time;
-            previous[neighbor.to] = { station: current, time: neighbor.time, line: neighbor.line };
-            pq.enqueue(neighbor.to, time);
-          }
-        });
-      }
-      if (distances[endNode] === Infinity) return null;
-      const path = []; let curr = endNode;
-      while (curr !== startNode) {
-        if (!previous[curr]) break;
-        path.unshift({ station: curr, ...previous[curr] });
-        curr = previous[curr].station;
-      }
-      return { totalTime: distances[endNode], path };
+    const getSavedSession = () => readStoredJson(SESSION_STORAGE_KEY, null);
+
+    const getSavedAchievements = () => {
+      const achievements = globalThis.MetroAchievements;
+      return achievements.normalize(
+        readStoredJson(ACHIEVEMENTS_STORAGE_KEY, null)
+      );
     };
-
-    const TRANSIT_GRAPH = {
-      'CPS': [{ to: 'TSQ', line: '1', time: 240 }, { to: 'TSQ', line: 'A', time: 300 }],
-      'TSQ': [{ to: 'CPS', line: '1', time: 240 }, { to: 'HUDSON', line: '7', time: 120 }, { to: 'GCT', line: '7', time: 300 }, { to: 'PENN', line: '1', time: 180 }, { to: 'HERALD', line: 'N', time: 360 }],
-      'HUDSON': [{ to: 'TSQ', line: '7', time: 120 }],
-      'PENN': [{ to: 'TSQ', line: '1', time: 180 }, { to: 'HERALD', line: 'B', time: 120 }, { to: 'WTC', line: 'A', time: 480 }],
-      'HERALD': [{ to: 'TSQ', line: 'N', time: 360 }, { to: 'PENN', line: 'B', time: 120 }, { to: 'UNION', line: 'N', time: 240 }],
-      'GCT': [{ to: 'TSQ', line: '7', time: 300 }, { to: 'UNION', line: '4', time: 360 }],
-      'UNION': [{ to: 'GCT', line: '4', time: 360 }, { to: 'HERALD', line: 'N', time: 240 }, { to: 'FULTON', line: '4', time: 600 }],
-      'WTC': [{ to: 'PENN', line: 'A', time: 480 }, { to: 'FULTON', line: 'A', time: 180 }],
-      'FULTON': [{ to: 'WTC', line: 'A', time: 180 }, { to: 'UNION', line: '4', time: 600 }, { to: 'BARC', line: '2', time: 720 }],
-      'BARC': [{ to: 'FULTON', line: '2', time: 720 }]
-    };
-
-    const TRANSLATIONS = { en: {}, zh: {} };
 
     function App() {
       // Navigation State
@@ -313,20 +1278,25 @@
       const [useAltMap, setUseAltMap] = useState(false);
 
       // User Sign-In State
-      const [currentUser, setCurrentUser] = useState({
-        isLoggedIn: true,
-        email: "demo.rider@mta.nyc",
-        displayName: "NYC Commuter"
-      });
+      const [currentUser, setCurrentUser] = useState(() =>
+        getSavedSession() || {
+          isLoggedIn: false,
+          email: '',
+          displayName: ''
+        }
+      );
       const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
       const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup' | 'forgot'
+      const [authName, setAuthName] = useState('');
       const [authEmail, setAuthEmail] = useState('');
       const [authPassword, setAuthPassword] = useState('');
+      const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+      const [rememberMe, setRememberMe] = useState(true);
       const [authNotice, setAuthNotice] = useState('');
 
       // Route Planner State
-      const [origin, setOrigin] = useState('TSQ');
-      const [destination, setDestination] = useState('BARC');
+      const [origin, setOrigin] = useState('127');
+      const [destination, setDestination] = useState('235');
       const [selectedRouteOption, setSelectedRouteOption] = useState(0);
       const [routeResults, setRouteResults] = useState([]);
 
@@ -338,8 +1308,8 @@
             {
               id: 101,
               nickname: 'Daily Work Commute',
-              originId: 'TSQ',
-              destId: 'BARC',
+              originId: '127',
+              destId: '235',
               originName: 'Times Sq - 42 St',
               destName: 'Atlantic Av - Barclays Ctr',
               lines: ['N', 'Q'],
@@ -354,15 +1324,8 @@
       const [editNameText, setEditNameText] = useState('');
 
       // User Preferences
-      const [preferences, setPreferences] = useState({
-        preferStepFree: true,
-        notifyOutages: true,
-        maxTransfers: 2,
-        ecoGamification: true
-      });
-
-      // Eco Rider Metrics
-      const [ecoMetrics, setEcoMetrics] = useState({ totalRides: 14, co2SavedKg: 28.4, hoursSaved: 6.2 });
+      const [preferences, setPreferences] = useState(getSavedPreferences);
+      const [journeyProgress, setJourneyProgress] = useState(getSavedAchievements);
       const [toastMsg, setToastMsg] = useState('');
 
       // --- De-coupled Offline Assistant State ("What-If" Feature Toggle Ready) ---
@@ -391,17 +1354,136 @@
       const polylineRef = useRef(null);
       const markersGroupRef = useRef(null);
 
-      const [lang, setLang] = useState('en');
+      const [lang, setLang] = useState(getSavedLanguage);
+      const [draftLanguage, setDraftLanguage] = useState(getSavedLanguage);
       const [geoData, setGeoData] = useState({ lines: null, stations: null });
-      const [transitGraph, setTransitGraph] = useState(null);
-      const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+      const [stationsData, setStationsData] = useState(STATIONS_FALLBACK);
+      const [liveTrains, setLiveTrains] = useState([]);
+      const [liveTrainCount, setLiveTrainCount] = useState(0);
+      const [liveFetchedAt, setLiveFetchedAt] = useState(null);
+      const [liveDataError, setLiveDataError] = useState('');
+      const [outages, setOutages] = useState(INITIAL_ELEVATOR_OUTAGES);
+      const [outageError, setOutageError] = useState('');
+      const [routeLoading, setRouteLoading] = useState(false);
+      const [routeError, setRouteError] = useState('');
+      const t = (key, values) =>
+        interpolate(
+          FEATURE_TRANSLATIONS[lang]?.[key] ??
+            FEATURE_TRANSLATIONS.en[key] ??
+            TRANSLATIONS[lang]?.[key] ??
+            TRANSLATIONS.en[key] ??
+            key,
+          values
+        );
+      const stationOptions = useMemo(
+        () => Object.values(stationsData).sort((a, b) => a.name.localeCompare(b.name)),
+        [stationsData]
+      );
+      const achievementStats = useMemo(
+        () => globalThis.MetroAchievements.stats(journeyProgress),
+        [journeyProgress]
+      );
+      const activeJourney = journeyProgress.active;
+      const achievementCopy = (definition, field) => {
+        const key = `achievement_${definition.id.replaceAll('-', '_')}_${field}`;
+        return (
+          FEATURE_TRANSLATIONS[lang]?.[key] ??
+          FEATURE_TRANSLATIONS.en[key] ??
+          definition[field]
+        );
+      };
 
       useEffect(() => {
-        fetch('./full_graph.json').then(res => res.json()).then(data => setTransitGraph(data)).catch(console.error);
+        document.documentElement.lang = lang;
+        document.documentElement.dir = 'ltr';
+      }, [lang]);
+
+      useEffect(() => {
+        writeStoredJson(PREFERENCES_STORAGE_KEY, preferences);
+      }, [preferences]);
+
+      useEffect(() => {
+        writeStoredJson('nyc_transit_saved_routes', savedRoutes);
+      }, [savedRoutes]);
+
+      useEffect(() => {
+        writeStoredJson(ACHIEVEMENTS_STORAGE_KEY, journeyProgress);
+      }, [journeyProgress]);
+
+      useEffect(() => {
+        let disposed = false;
+        fetch(apiUrl('/api/v1/stations'))
+          .then((response) => {
+            if (!response.ok) throw new Error(`Stations API returned ${response.status}`);
+            return response.json();
+          })
+          .then((data) => {
+            if (disposed || !Array.isArray(data.stations) || data.stations.length === 0) return;
+            const nextStations = Object.fromEntries(
+              data.stations.map((station) => [station.id, station])
+            );
+            setStationsData(nextStations);
+            setOrigin((current) => nextStations[current] ? current : data.stations[0].id);
+            setDestination((current) => nextStations[current] ? current : data.stations[1].id);
+          })
+          .catch((error) => {
+            console.error('Unable to load stations from Express:', error);
+          });
+        return () => { disposed = true; };
       }, []);
 
       useEffect(() => {
-        if (currentView !== 'map' || useAltMap || !mapContainerRef.current) return;
+        let disposed = false;
+
+        const loadLiveData = async () => {
+          const [trainsResult, outagesResult] = await Promise.allSettled([
+            fetch(apiUrl('/api/v1/trains/live')).then((response) => {
+              if (!response.ok) throw new Error(`Train API returned ${response.status}`);
+              return response.json();
+            }),
+            fetch(apiUrl('/api/v1/accessibility')).then((response) => {
+              if (!response.ok) throw new Error(`Accessibility API returned ${response.status}`);
+              return response.json();
+            })
+          ]);
+
+          if (disposed) return;
+
+          if (trainsResult.status === 'fulfilled') {
+            setLiveTrains(trainsResult.value.trains || []);
+            setLiveTrainCount(trainsResult.value.trainCount || 0);
+            setLiveFetchedAt(trainsResult.value.timestamp || trainsResult.value.cachedAt || null);
+            setLiveDataError('');
+          } else {
+            setLiveDataError('liveUnavailable');
+          }
+
+          if (outagesResult.status === 'fulfilled') {
+            setOutages(outagesResult.value.outages || []);
+            setOutageError('');
+          } else {
+            setOutageError('outagesUnavailable');
+          }
+        };
+
+        loadLiveData();
+        const timer = setInterval(loadLiveData, 30000);
+        return () => {
+          disposed = true;
+          clearInterval(timer);
+        };
+      }, []);
+
+      useEffect(() => {
+        if (currentView !== 'map' || useAltMap || !mapContainerRef.current) {
+          if (mapInstanceRef.current) {
+            mapInstanceRef.current.remove();
+            mapInstanceRef.current = null;
+            markersGroupRef.current = null;
+            polylineRef.current = null;
+          }
+          return;
+        }
 
         if (!mapInstanceRef.current) {
           const map = L.map(mapContainerRef.current, { center: [40.730, -73.980], zoom: 11, zoomControl: true });
@@ -411,13 +1493,10 @@
         }
 
         const loadGeoJSON = async () => {
-          const [linesRes, stationsRes] = await Promise.all([
-            fetch('https://data.ny.gov/resource/s692-irgq.geojson'),
-            fetch('https://data.ny.gov/resource/39hk-dx4f.geojson')
-          ]);
-          const lines = await linesRes.json();
-          const stations = await stationsRes.json();
-          setGeoData({ lines, stations });
+          const response = await fetch(apiUrl('/api/v1/routes/shapes'));
+          if (!response.ok) throw new Error(`Map API returned ${response.status}`);
+          const data = await response.json();
+          setGeoData({ lines: data.lines, stations: data.stations });
         };
         if (!geoData.lines) loadGeoJSON();
       }, [currentView, useAltMap]);
@@ -428,7 +1507,11 @@
         markersGroupRef.current.clearLayers();
 
         L.geoJSON(geoData.lines, {
-          style: (feature) => ({ color: HEX_LINE_COLORS[feature.properties.route_id] || '#808080', weight: 4, opacity: 0.8 })
+          style: (feature) => ({
+            color: feature.properties.route_color || HEX_LINE_COLORS[displayRouteId(feature.properties.route_id)] || '#808080',
+            weight: 4,
+            opacity: 0.8
+          })
         }).addTo(mapInstanceRef.current);
 
         L.geoJSON(geoData.stations, {
@@ -448,88 +1531,138 @@
       }, [geoData]);
 
 
-      // Route Calculation & Polyline Visualizer
+      // Server-side all-station route planning. The frontend sends parent
+      // station IDs; the backend resolves direction-specific platforms.
       useEffect(() => {
-        if (origin === destination) { setRouteResults([]); return; }
-        
-        let result = null;
-        if (transitGraph) {
-          const startMtaId = STATIONS_DATA[origin].mta_id;
-          const endMtaId = STATIONS_DATA[destination].mta_id;
-          result = findShortestPath(transitGraph, startMtaId, endMtaId);
+        if (!stationsData[origin] || !stationsData[destination]) return;
+        if (origin === destination) {
+          setRouteResults([]);
+          setRouteError('');
+          return;
         }
 
-        if (result && result.path.length > 0) {
-          const usedLines = [...new Set(result.path.map(p => p.line))].filter(Boolean);
-          const steps = result.path.map((step, i) => {
-            const from = i === 0 ? STATIONS_DATA[origin].name : `Station ${result.path[i-1].station}`;
-            return `Ride from ${from} to Station ${step.station} (${Math.round(step.time/60)} mins)`;
+        const controller = new AbortController();
+        setRouteLoading(true);
+        setRouteError('');
+
+        fetch(apiUrl(`/api/v1/routes/plan?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&maxOptions=3`), {
+          signal: controller.signal
+        })
+          .then((response) => {
+            if (!response.ok) throw new Error(`Route API returned ${response.status}`);
+            return response.json();
+          })
+          .then((data) => {
+            setRouteResults(data.routes || []);
+            setSelectedRouteOption(0);
+            if (!data.routes?.length) {
+              setRouteError('noRouteFound');
+            }
+          })
+          .catch((error) => {
+            if (error.name !== 'AbortError') {
+              console.error('Route planning failed:', error);
+              setRouteError('routeLoadFailed');
+              setRouteResults([]);
+            }
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setRouteLoading(false);
           });
-          
-          setRouteResults([{
-            id: 0,
-            title: "Fastest Route (Real GTFS)",
-            duration: Math.round(result.totalTime / 60),
-            transfers: usedLines.length > 1 ? usedLines.length - 1 : 0,
-            isAda: false,
-            lines: usedLines.slice(0, 3),
-            isExpress: usedLines.map(() => false),
-            steps: steps.slice(0, 6)
-          }]);
-        } else {
-          setRouteResults([{ id: 0, title: "Option 1: Express Route", duration: 18, transfers: 1, isAda: true, lines: ['N', 'Q'], isExpress: [true, false], steps: ["Board N Express", "Transfer to Q", "Arrive"] }]);
+
+        return () => controller.abort();
+      }, [origin, destination, stationsData]);
+
+      useEffect(() => {
+        if (!mapInstanceRef.current) return;
+        if (polylineRef.current) {
+          mapInstanceRef.current.removeLayer(polylineRef.current);
+          polylineRef.current = null;
         }
 
-        // 👇 新增：绘制地图上的连线
-        if (mapInstanceRef.current) {
-          if (polylineRef.current) mapInstanceRef.current.removeLayer(polylineRef.current);
-          const startSt = STATIONS_DATA[origin]; const endSt = STATIONS_DATA[destination];
-          if (startSt && endSt) {
-            const midLat = (startSt.lat + endSt.lat) / 2 + 0.005;
-            const midLng = (startSt.lng + endSt.lng) / 2 - 0.005;
-            const latLngs = [[startSt.lat, startSt.lng], [midLat, midLng], [endSt.lat, endSt.lng]];
-            const activeLine = result && result.path.length > 0 ? result.path[0].line : '1';
-            polylineRef.current = L.polyline(latLngs, { color: HEX_LINE_COLORS[activeLine] || '#3b82f6', weight: 5, opacity: 0.85, dashArray: '8, 8' }).addTo(mapInstanceRef.current);
-            mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
-          }
-        }
-      }, [origin, destination, transitGraph]);
+        const selectedRoute = routeResults.find((route) => route.id === selectedRouteOption);
+        if (!selectedRoute?.polyline?.length) return;
+
+        const activeLine = selectedRoute.lines?.[0] || '1';
+        polylineRef.current = L.polyline(selectedRoute.polyline, {
+          color: HEX_LINE_COLORS[activeLine] || '#3b82f6',
+          weight: 5,
+          opacity: 0.9,
+          dashArray: '8, 6'
+        }).addTo(mapInstanceRef.current);
+        mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
+      }, [routeResults, selectedRouteOption, geoData, currentView, useAltMap]);
 
 
       // Sign-In Handlers
       const handleAuthSubmit = (e) => {
         e.preventDefault();
-        if (!authEmail) {
-          setAuthNotice("Please enter a valid email address.");
+        const email = authEmail.trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          setAuthNotice(t('validEmailRequired'));
           return;
         }
 
-        if (authMode === 'login' || authMode === 'signup') {
-          setCurrentUser({
-            isLoggedIn: true,
-            email: authEmail,
-            displayName: authEmail.split('@')[0]
-          });
-          showToast(`Welcome, ${authEmail}!`);
-          setIsAuthModalOpen(false);
-        } else if (authMode === 'forgot') {
-          setAuthNotice(`Password reset link sent to ${authEmail}`);
+        if (authMode === 'forgot') {
+          setAuthNotice(t('resetSent', { email }));
           setTimeout(() => {
             setAuthMode('login');
             setAuthNotice('');
           }, 2500);
+          return;
         }
+
+        if (authPassword.length < 8) {
+          setAuthNotice(t('passwordLength'));
+          return;
+        }
+
+        if (authMode === 'signup') {
+          if (!authName.trim()) {
+            setAuthNotice(t('nameRequired'));
+            return;
+          }
+          if (authPassword !== authConfirmPassword) {
+            setAuthNotice(t('passwordsMismatch'));
+            return;
+          }
+        }
+
+        const displayName = authName.trim() || email.split('@')[0];
+        const nextUser = {
+          isLoggedIn: true,
+          email,
+          displayName
+        };
+        setCurrentUser(nextUser);
+        if (rememberMe) {
+          writeStoredJson(SESSION_STORAGE_KEY, nextUser);
+        } else {
+          try {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+          } catch (_error) {
+            // Storage may be unavailable under strict browser privacy settings.
+          }
+        }
+        showToast(t('welcomeUser', { email }));
+        setIsAuthModalOpen(false);
+        setAuthNotice('');
       };
 
       const handleSignOut = () => {
         setCurrentUser({ isLoggedIn: false, email: '', displayName: '' });
-        showToast("Signed out successfully.");
+        try {
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+        } catch (_error) {
+          // Storage may be unavailable under strict browser privacy settings.
+        }
+        showToast(t('signedOut'));
       };
 
       // Favorite Route Handlers
       const handleSaveRoute = (opt) => {
-        const startSt = STATIONS_DATA[origin];
-        const endSt = STATIONS_DATA[destination];
+        const startSt = stationsData[origin];
+        const endSt = stationsData[destination];
         
         const newRoute = {
           id: Date.now(),
@@ -543,7 +1676,10 @@
         };
 
         setSavedRoutes(prev => [newRoute, ...prev]);
-        showToast(`Saved "${newRoute.nickname}" to Favorites!`);
+        setJourneyProgress((current) =>
+          globalThis.MetroAchievements.bookmark(current, new Date().toISOString())
+        );
+        showToast(t('routeSaved'));
       };
 
       const handleStartEdit = (fav) => {
@@ -554,19 +1690,19 @@
       const handleSaveEdit = (id) => {
         setSavedRoutes(prev => prev.map(r => r.id === id ? { ...r, nickname: editNameText } : r));
         setEditingId(null);
-        showToast("Route name updated!");
+        showToast(t('routeNameUpdated'));
       };
 
       const handleDeleteRoute = (id) => {
         setSavedRoutes(prev => prev.filter(r => r.id !== id));
-        showToast("Route removed from favorites");
+        showToast(t('routeRemoved'));
       };
 
       const handleLoadRoute = (fav) => {
         setOrigin(fav.originId);
         setDestination(fav.destId);
         setCurrentView('map');
-        showToast(`Loaded "${fav.nickname}" on map!`);
+        showToast(t('routeLoaded', { name: fav.nickname }));
       };
 
       const showToast = (msg) => {
@@ -574,13 +1710,47 @@
         setTimeout(() => setToastMsg(''), 3000);
       };
 
-      const handleLogTrip = () => {
-        setEcoMetrics(prev => ({
-          totalRides: prev.totalRides + 1,
-          co2SavedKg: parseFloat((prev.co2SavedKg + 1.8).toFixed(1)),
-          hoursSaved: parseFloat((prev.hoursSaved + 0.3).toFixed(1))
-        }));
-        showToast("Trip logged! Saved +1.8kg CO₂!");
+      const handleSaveLanguage = () => {
+        setLang(draftLanguage);
+        persistLanguage(draftLanguage);
+        showToast(
+          interpolate(TRANSLATIONS[draftLanguage]?.languageSaved || TRANSLATIONS.en.languageSaved)
+        );
+      };
+
+      const handleStartJourney = () => {
+        const journeyId =
+          globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        setJourneyProgress((current) =>
+          globalThis.MetroAchievements.start(current, origin, destination, journeyId)
+        );
+        showToast(t('journeyStarted'));
+      };
+
+      const handleCompleteJourney = () => {
+        const now = new Date().toISOString();
+        const previous = journeyProgress;
+        const next = globalThis.MetroAchievements.complete(previous, now);
+        setJourneyProgress(next);
+        const newlyUnlocked = globalThis.MetroAchievements.definitions.filter(
+          (definition) =>
+            !previous.unlocked[definition.id] && next.unlocked[definition.id]
+        );
+        if (newlyUnlocked.length > 0) {
+          showToast(
+            t('achievementUnlocked', {
+              name: achievementCopy(newlyUnlocked[0], 'name')
+            })
+          );
+        } else {
+          showToast(t('journeyCompleted'));
+        }
+      };
+
+      const handleCancelJourney = () => {
+        setJourneyProgress((current) =>
+          globalThis.MetroAchievements.cancel(current)
+        );
       };
 
       // Assistant Message Submission
@@ -589,11 +1759,38 @@
         if (!textToProcess.trim()) return;
 
         const userMsgObj = { id: Date.now(), sender: 'user', text: textToProcess };
-        const responseText = runOfflineAssistantQuery(textToProcess, origin, destination);
+        const responseText = runOfflineAssistantQuery(textToProcess, origin, destination, stationsData, routeResults);
         const botMsgObj = { id: Date.now() + 1, sender: 'bot', text: responseText };
 
         setAssistantMessages(prev => [...prev, userMsgObj, botMsgObj]);
         setAssistantInput('');
+      };
+
+      const formatRouteSteps = (route) => {
+        if (!Array.isArray(route.segments)) return route.steps || [];
+        const steps = [];
+        route.segments.forEach((segment) => {
+          const minutes = Math.max(1, Math.round(segment.durationSeconds / 60));
+          if (segment.kind === 'subway') {
+            steps.push(t('rideRoute', {
+              line: segment.line,
+              from: segment.fromName,
+              to: segment.toName,
+              minutes,
+              stops: Math.max(1, (segment.stopIds?.length || 2) - 1)
+            }));
+          } else if (segment.fromName !== segment.toName) {
+            steps.push(t('transferWalk', {
+              from: segment.fromName,
+              to: segment.toName,
+              minutes
+            }));
+          }
+        });
+        steps.push(t('arriveAt', {
+          station: stationsData[destination]?.name || route.destinationId
+        }));
+        return steps;
       };
 
       return (
@@ -601,7 +1798,7 @@
           
           {/* Notification Toast */}
           {toastMsg && (
-            <div className="fixed bottom-6 right-6 z-50 bg-blue-600 text-white px-5 py-3.5 rounded-xl shadow-2xl text-xs font-bold flex items-center gap-2.5 animate-bounce border border-blue-400">
+            <div className="fixed bottom-6 right-6 z-50 bg-blue-600 text-white px-5 py-3.5 rounded-xl shadow-2xl text-xs font-bold flex items-center gap-2.5 border border-blue-400">
               <Icon name="bookmark" className="w-4 h-4" />
               {toastMsg}
             </div>
@@ -611,10 +1808,10 @@
           <button
             onClick={() => setIsAssistantOpen(!isAssistantOpen)}
             className="fixed bottom-6 left-6 z-40 bg-blue-600 hover:bg-blue-500 text-white p-3.5 rounded-full shadow-2xl flex items-center gap-2 font-bold text-xs border border-blue-400 transition hover:scale-105"
-            title="Open Subterranean Assistant"
+            title={t('offlineAssistant')}
           >
             <Icon name="message-square" className="w-5 h-5" />
-            <span className="hidden sm:inline">Offline Assistant</span>
+            <span className="hidden sm:inline">{t('offlineAssistant')}</span>
           </button>
 
           {/* Offline Assistant Drawer */}
@@ -626,9 +1823,9 @@
                     AI
                   </div>
                   <div>
-                    <p className="font-bold text-xs text-white">NYC Transit Assistant</p>
+                    <p className="font-bold text-xs text-white">{t('transitAssistant')}</p>
                     <p className="text-[10px] text-emerald-400 flex items-center gap-1">
-                      <span>⚡ {isOnline ? 'Online Sync' : 'Underground Offline Mode'}</span>
+                      <span>⚡ {isOnline ? t('onlineSync') : t('offlineMode')}</span>
                     </p>
                   </div>
                 </div>
@@ -655,13 +1852,13 @@
               {/* Quick Action Chips */}
               <div className="p-2 bg-slate-950 border-t border-slate-800 flex flex-wrap gap-1">
                 <button onClick={() => handleSendAssistantMsg("Is route step-free accessible?")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
-                  ♿ Step-free access?
+                  ♿ {t('stepFreeAccess')}
                 </button>
                 <button onClick={() => handleSendAssistantMsg("Check subway delays")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
-                  ⚠️ Check line delays
+                  ⚠️ {t('checkDelays')}
                 </button>
                 <button onClick={() => handleSendAssistantMsg("Food near stop")} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded-lg border border-slate-700">
-                  🍕 Nearby food
+                  🍕 {t('nearbyFood')}
                 </button>
               </div>
 
@@ -671,7 +1868,7 @@
                   type="text"
                   value={assistantInput}
                   onChange={(e) => setAssistantInput(e.target.value)}
-                  placeholder="Ask assistant underground..."
+                  placeholder={t('askAssistant')}
                   className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
                 />
                 <button type="submit" className="p-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs">
@@ -697,14 +1894,14 @@
                     MTA
                   </div>
                   <h3 className="text-lg font-bold text-white">
-                    {authMode === 'login' && 'Sign In to Transit Hub'}
-                    {authMode === 'signup' && 'Create Commuter Account'}
-                    {authMode === 'forgot' && 'Reset Password'}
+                    {authMode === 'login' && t('signInTitle')}
+                    {authMode === 'signup' && t('signUpTitle')}
+                    {authMode === 'forgot' && t('forgotTitle')}
                   </h3>
                   <p className="text-xs text-slate-400">
-                    {authMode === 'login' && 'Access saved favorite routes and synchronized travel preferences'}
-                    {authMode === 'signup' && 'Create an account to back up your favorite MTA routes'}
-                    {authMode === 'forgot' && 'Enter your email to receive a password reset link'}
+                    {authMode === 'login' && t('signInDesc')}
+                    {authMode === 'signup' && t('signUpDesc')}
+                    {authMode === 'forgot' && t('forgotDesc')}
                   </p>
                 </div>
 
@@ -715,50 +1912,99 @@
                 )}
 
                 <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
+                  {authMode === 'signup' && (
+                    <div>
+                      <label className="block text-slate-300 font-semibold mb-1">{t('fullName')}</label>
+                      <input
+                        type="text"
+                        required
+                        value={authName}
+                        onChange={(e) => setAuthName(e.target.value)}
+                        placeholder="Ada Lovelace"
+                        autoComplete="name"
+                        className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+
                   <div>
-                    <label className="block text-slate-300 font-semibold mb-1">Email Address</label>
+                    <label className="block text-slate-300 font-semibold mb-1">{t('emailAddress')}</label>
                     <input 
                       type="email"
                       required
                       value={authEmail}
                       onChange={(e) => setAuthEmail(e.target.value)}
                       placeholder="rider@example.com"
+                      autoComplete="email"
                       className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
                     />
                   </div>
 
                   {authMode !== 'forgot' && (
                     <div>
-                      <label className="block text-slate-300 font-semibold mb-1">Password</label>
+                      <label className="block text-slate-300 font-semibold mb-1">{t('password')}</label>
                       <input 
                         type="password"
                         required
+                        minLength={8}
                         value={authPassword}
                         onChange={(e) => setAuthPassword(e.target.value)}
                         placeholder="••••••••"
+                        autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+                        className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
+                      />
+                      {authMode === 'signup' && (
+                        <p className="text-[11px] text-slate-500 mt-1">{t('passwordHint')}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {authMode === 'signup' && (
+                    <div>
+                      <label className="block text-slate-300 font-semibold mb-1">{t('confirmPassword')}</label>
+                      <input
+                        type="password"
+                        required
+                        minLength={8}
+                        value={authConfirmPassword}
+                        onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                        placeholder="••••••••"
+                        autoComplete="new-password"
                         className="w-full p-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-blue-500"
                       />
                     </div>
+                  )}
+
+                  {authMode === 'login' && (
+                    <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={rememberMe}
+                        onChange={(e) => setRememberMe(e.target.checked)}
+                        className="w-4 h-4 rounded text-blue-600"
+                      />
+                      {t('rememberMe')}
+                    </label>
                   )}
 
                   <button
                     type="submit"
                     className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
                   >
-                    {authMode === 'login' && 'Sign In'}
-                    {authMode === 'signup' && 'Create Account'}
-                    {authMode === 'forgot' && 'Send Reset Email'}
+                    {authMode === 'login' && t('signIn')}
+                    {authMode === 'signup' && t('createAccount')}
+                    {authMode === 'forgot' && t('sendReset')}
                   </button>
                 </form>
 
                 <div className="pt-2 border-t border-slate-800 text-center text-xs text-slate-400 flex justify-center gap-4">
                   {authMode === 'login' ? (
                     <>
-                      <button onClick={() => { setAuthMode('signup'); setAuthNotice(''); }} className="hover:text-white underline">Need an account? Register</button>
-                      <button onClick={() => { setAuthMode('forgot'); setAuthNotice(''); }} className="hover:text-white underline">Forgot password?</button>
+                      <button onClick={() => { setAuthMode('signup'); setAuthNotice(''); }} className="hover:text-white underline">{t('needAccount')}</button>
+                      <button onClick={() => { setAuthMode('forgot'); setAuthNotice(''); }} className="hover:text-white underline">{t('forgotPassword')}</button>
                     </>
                   ) : (
-                    <button onClick={() => { setAuthMode('login'); setAuthNotice(''); }} className="hover:text-white underline">Back to Sign In</button>
+                    <button onClick={() => { setAuthMode('login'); setAuthNotice(''); }} className="hover:text-white underline">{t('backSignIn')}</button>
                   )}
                 </div>
               </div>
@@ -776,10 +2022,10 @@
                   <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     NYC Transit Hub Pro
                     <span className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono">
-                      Live Updates
+                      {t('liveUpdates')}
                     </span>
                   </h1>
-                  <p className="text-xs opacity-75 text-slate-400">Accessible Commuter Wayfinding</p>
+                  <p className="text-xs opacity-75 text-slate-400">{t('subtitle')}</p>
                 </div>
               </div>
 
@@ -792,7 +2038,7 @@
                   }`}
                 >
                   <Icon name="eye" className="w-3.5 h-3.5" />
-                  {highContrast ? 'Standard Mode' : 'High Contrast'}
+                  {highContrast ? t('standardMode') : t('highContrast')}
                 </button>
 
                 <nav className="flex items-center space-x-1 border rounded-xl p-1 border-slate-800 bg-slate-900">
@@ -803,7 +2049,7 @@
                     }`}
                   >
                     <Icon name="map" className="w-3.5 h-3.5" />
-                    Map & Routes
+                    {t('mapRoutes')}
                   </button>
 
                   <button
@@ -813,7 +2059,7 @@
                     }`}
                   >
                     <Icon name="user" className="w-3.5 h-3.5" />
-                    Profile & Favorites ({savedRoutes.length})
+                    {t('profileFavorites')} ({savedRoutes.length})
                   </button>
                 </nav>
 
@@ -832,7 +2078,7 @@
                         onClick={handleSignOut}
                         className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white text-xs font-semibold border border-slate-700 transition"
                       >
-                        Sign Out
+                        {t('signOut')}
                       </button>
                     </div>
                   ) : (
@@ -841,7 +2087,7 @@
                       className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow transition flex items-center gap-1.5"
                     >
                       <Icon name="log-in" className="w-3.5 h-3.5" />
-                      Sign In / Register
+                      {t('signInRegister')}
                     </button>
                   )}
                 </div>
@@ -863,23 +2109,100 @@
                     </div>
                     <div>
                       <h2 className="text-lg font-bold text-white">
-                        {currentUser.isLoggedIn ? `${currentUser.displayName}'s Profile` : 'Guest Profile'}
+                        {currentUser.isLoggedIn ? t('profileSuffix', { name: currentUser.displayName }) : t('guestProfile')}
                       </h2>
                       <p className="text-xs text-slate-400">
-                        {currentUser.isLoggedIn ? currentUser.email : 'Local Demo Mode • Sign in to sync saved routes'}
+                        {currentUser.isLoggedIn ? currentUser.email : t('demoMode')}
                       </p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-4 text-center">
                     <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                      <p className="text-xs text-slate-400">Total Rides</p>
-                      <p className="text-base font-bold text-white">{ecoMetrics.totalRides}</p>
+                      <p className="text-xs text-slate-400">{t('totalRides')}</p>
+                      <p className="text-base font-bold text-white">{achievementStats.rides}</p>
                     </div>
                     <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                      <p className="text-xs text-slate-400">CO₂ Saved</p>
-                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg} kg</p>
+                      <p className="text-xs text-slate-400">{t('co2Saved')}</p>
+                      <p className="text-base font-bold text-emerald-400">{(achievementStats.rides * 1.8).toFixed(1)} kg</p>
                     </div>
+                  </div>
+                </div>
+
+                {/* Journey Achievements */}
+                <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                    <div>
+                      <h2 className="text-base font-bold text-white flex items-center gap-2">
+                        <Icon name="trophy" className="w-5 h-5 text-amber-400" />
+                        {t('achievementsTitle')}
+                      </h2>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {t('achievementProgress', {
+                          unlocked: Object.keys(journeyProgress.unlocked).length,
+                          total: globalThis.MetroAchievements.definitions.length
+                        })}
+                      </p>
+                    </div>
+                    <div className="w-32 h-2 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-400"
+                        style={{
+                          width: `${(
+                            Object.keys(journeyProgress.unlocked).length /
+                            globalThis.MetroAchievements.definitions.length
+                          ) * 100}%`
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    {globalThis.MetroAchievements.definitions.map((definition) => {
+                      const currentValue = achievementStats[definition.metric] || 0;
+                      const unlockedAt = journeyProgress.unlocked[definition.id];
+                      const progress = Math.min(100, (currentValue / definition.target) * 100);
+                      return (
+                        <div
+                          key={definition.id}
+                          className={`p-3 rounded-xl border ${
+                            unlockedAt
+                              ? 'bg-amber-500/10 border-amber-500/40'
+                              : 'bg-slate-900 border-slate-800'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <span className={`text-2xl ${unlockedAt ? '' : 'grayscale opacity-50'}`}>
+                              {definition.icon}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className={`font-bold ${unlockedAt ? 'text-amber-300' : 'text-slate-300'}`}>
+                                  {achievementCopy(definition, 'name')}
+                                </p>
+                                <span className="text-[10px] text-slate-500 font-mono">
+                                  {Math.min(currentValue, definition.target)}/{definition.target}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 mt-0.5">
+                                {achievementCopy(definition, 'description')}
+                              </p>
+                              <div className="h-1.5 mt-2 rounded-full bg-slate-800 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${unlockedAt ? 'bg-amber-400' : 'bg-blue-500'}`}
+                                  style={{ width: `${progress}%` }}
+                                />
+                              </div>
+                              {unlockedAt && (
+                                <p className="text-[10px] text-amber-500/80 mt-1">
+                                  {new Date(unlockedAt).toLocaleDateString(lang)}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -889,19 +2212,19 @@
                     <div>
                       <h2 className="text-base font-bold text-white flex items-center gap-2">
                         <Icon name="bookmark" className="w-5 h-5 text-blue-400" />
-                        Saved Favorite Routes
+                        {t('savedRoutesTitle')}
                       </h2>
-                      <p className="text-xs text-slate-400">Manage saved routes or load them directly onto the map</p>
+                      <p className="text-xs text-slate-400">{t('savedRoutesDesc')}</p>
                     </div>
                     <span className="text-xs font-mono px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
-                      {savedRoutes.length} saved
+                      {t('savedCount', { count: savedRoutes.length })}
                     </span>
                   </div>
 
                   {savedRoutes.length === 0 ? (
                     <div className="text-center py-8 text-slate-500 text-xs">
                       <Icon name="bookmark" className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      No saved routes yet. Use "Bookmark Route" on any calculated route on the map!
+                      {t('noSavedRoutes')}
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -914,20 +2237,20 @@
                                 value={editNameText}
                                 onChange={(e) => setEditNameText(e.target.value)}
                                 className="p-2 rounded-lg bg-slate-950 border border-blue-500 text-white text-xs flex-1 focus:outline-none"
-                                placeholder="Enter route name..."
+                                placeholder={t('routeNamePlaceholder')}
                               />
                               <button 
                                 onClick={() => handleSaveEdit(fav.id)}
                                 className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
                               >
-                                Save
+                                {t('save')}
                               </button>
                             </div>
                           ) : (
                             <div className="space-y-1">
                               <p className="font-bold text-sm text-slate-100 flex items-center gap-2">
                                 <span>{fav.nickname}</span>
-                                <button onClick={() => handleStartEdit(fav)} className="text-slate-400 hover:text-blue-400 transition" title="Rename Route">
+                                <button onClick={() => handleStartEdit(fav)} className="text-slate-400 hover:text-blue-400 transition" title={t('renameRoute')}>
                                   <Icon name="pencil" className="w-3.5 h-3.5" />
                                 </button>
                               </p>
@@ -947,12 +2270,12 @@
                               onClick={() => handleLoadRoute(fav)}
                               className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow"
                             >
-                              <Icon name="navigation" className="w-3.5 h-3.5" /> Show on Map
+                              <Icon name="navigation" className="w-3.5 h-3.5" /> {t('showOnMap')}
                             </button>
                             <button 
                               onClick={() => handleDeleteRoute(fav.id)}
                               className="p-2 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-400 hover:text-white transition"
-                              title="Delete Route"
+                              title={t('deleteRoute')}
                             >
                               <Icon name="trash-2" className="w-4 h-4" />
                             </button>
@@ -963,16 +2286,53 @@
                   )}
                 </div>
 
+                {/* Interface Language */}
+                <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
+                  <div>
+                    <h2 className="text-base font-bold text-white flex items-center gap-2">
+                      <Icon name="languages" className="w-5 h-5 text-blue-400" />
+                      {t('languageTitle')}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">{t('languageDesc')}</p>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                    <div className="flex-1">
+                      <label htmlFor="languageSelect" className="block text-slate-300 font-semibold mb-1 text-xs">
+                        {t('interfaceLanguage')}
+                      </label>
+                      <select
+                        id="languageSelect"
+                        value={draftLanguage}
+                        onChange={(event) => setDraftLanguage(event.target.value)}
+                        className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium text-xs focus:outline-none focus:border-blue-500"
+                      >
+                        {LANGUAGE_OPTIONS.map((option) => (
+                          <option key={option.code} value={option.code}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSaveLanguage}
+                      disabled={draftLanguage === lang}
+                      className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-xs transition"
+                    >
+                      {t('saveLanguage')}
+                    </button>
+                  </div>
+                </div>
+
                 {/* Commute Preferences */}
                 <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
                   <h2 className="text-base font-bold text-white flex items-center gap-2 border-b border-slate-800 pb-3">
                     <Icon name="sliders" className="w-5 h-5 text-blue-400" />
-                    Commuter Preferences
+                    {t('commuterPreferences')}
                   </h2>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                     <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900 cursor-pointer">
-                      <span className="text-slate-300 font-semibold">Prefer Step-Free Accessible Elevators</span>
+                      <span className="text-slate-300 font-semibold">{t('preferStepFree')}</span>
                       <input 
                         type="checkbox" 
                         checked={preferences.preferStepFree}
@@ -982,7 +2342,7 @@
                     </label>
 
                     <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900 cursor-pointer">
-                      <span className="text-slate-300 font-semibold">Elevator Outage Notifications</span>
+                      <span className="text-slate-300 font-semibold">{t('outageNotifications')}</span>
                       <input 
                         type="checkbox" 
                         checked={preferences.notifyOutages}
@@ -1007,40 +2367,75 @@
                   <div className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
                     <h2 className="text-base font-bold flex items-center gap-2 text-white">
                       <Icon name="navigation" className="w-5 h-5 text-blue-400" />
-                      NYC Route Finder
+                      {t('routeFinder')}
                     </h2>
 
                     <div className="space-y-3 text-xs">
-                      <div>
-                        <label className="block text-slate-400 font-semibold mb-1">Start Station</label>
-                        <select 
-                          value={origin} 
-                          onChange={(e) => setOrigin(e.target.value)}
-                          className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
-                        >
-                          {Object.values(STATIONS_DATA).map(s => (
-                            <option key={`orig-${s.id}`} value={s.id}>{s.name} ({s.borough})</option>
-                          ))}
-                        </select>
-                      </div>
+                      <StationSearch
+                        id="originStationSearch"
+                        label={t('startStation')}
+                        value={origin}
+                        stations={stationOptions}
+                        onChange={setOrigin}
+                        placeholder={t('searchStart')}
+                        t={t}
+                      />
 
-                      <div>
-                        <label className="block text-slate-400 font-semibold mb-1">Destination Station</label>
-                        <select 
-                          value={destination} 
-                          onChange={(e) => setDestination(e.target.value)}
-                          className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
-                        >
-                          {Object.values(STATIONS_DATA).map(s => (
-                            <option key={`dest-${s.id}`} value={s.id}>{s.name} ({s.borough})</option>
-                          ))}
-                        </select>
-                      </div>
+                      <StationSearch
+                        id="destinationStationSearch"
+                        label={t('destinationStation')}
+                        value={destination}
+                        stations={stationOptions}
+                        onChange={setDestination}
+                        placeholder={t('searchDestination')}
+                        t={t}
+                      />
                     </div>
                   </div>
 
                   {/* Calculated Route Cards */}
                   <div className="space-y-3">
+                    {activeJourney && (
+                      <div className="p-4 rounded-2xl border border-emerald-700/70 bg-emerald-950/30 space-y-3">
+                        <div>
+                          <p className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold">
+                            {t('journeyInProgress')}
+                          </p>
+                          <p className="text-sm font-bold text-white mt-1">
+                            {stationsData[activeJourney.origin]?.name || activeJourney.origin}
+                            <span className="text-slate-500 mx-2">→</span>
+                            {stationsData[activeJourney.destination]?.name || activeJourney.destination}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleCompleteJourney}
+                            className="flex-1 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
+                          >
+                            {t('completeJourney')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelJourney}
+                            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs"
+                          >
+                            {t('cancelJourney')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {routeLoading && (
+                      <div className="p-4 rounded-2xl border border-blue-900 bg-blue-950/30 text-xs text-blue-300 flex items-center gap-2">
+                        <Icon name="loader-circle" className="w-4 h-4" />
+                        {t('calculatingRoutes', { count: stationOptions.length })}
+                      </div>
+                    )}
+                    {routeError && !routeLoading && (
+                      <div className="p-4 rounded-2xl border border-amber-900 bg-amber-950/30 text-xs text-amber-300">
+                        {t(routeError)}
+                      </div>
+                    )}
                     {routeResults.map((opt) => (
                       <div
                         key={opt.id}
@@ -1054,10 +2449,12 @@
                         <div className="flex items-start justify-between mb-2">
                           <div>
                             <h3 className="font-bold text-sm text-white flex items-center gap-2">
-                              {opt.title}
-                              {opt.isAda && <span className="text-[10px] text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded border border-blue-800">♿ Accessible</span>}
+                              {opt.id === 0 ? t('fastestRoute') : t('alternativeRoute', { number: opt.id })}
+                              {opt.isAda && <span className="text-[10px] text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded border border-blue-800">♿ {t('accessible')}</span>}
                             </h3>
-                            <p className="text-xs text-slate-400 mt-0.5">{opt.duration} mins • {opt.transfers} transfer(s)</p>
+                            <p className="text-xs text-slate-400 mt-0.5">
+                              {opt.duration} {t('mins')} • {t('transferCount', { count: opt.transfers })}
+                            </p>
                           </div>
                           <div className="flex items-center space-x-1.5">
                             {opt.lines.map((l, idx) => (
@@ -1073,7 +2470,7 @@
 
                         {/* Step Details */}
                         <div className="space-y-1.5 my-3 pl-2 border-l-2 border-slate-800 text-xs text-slate-300">
-                          {opt.steps.map((st, i) => (
+                          {formatRouteSteps(opt).map((st, i) => (
                             <p key={i} className="flex items-start gap-1.5">
                               <span className="text-slate-500">•</span> {st}
                             </p>
@@ -1083,10 +2480,14 @@
                         {/* Actions */}
                         <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
                           <button
-                            onClick={handleLogTrip}
-                            className="text-[11px] text-emerald-400 hover:underline flex items-center gap-1 font-semibold"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStartJourney();
+                            }}
+                            disabled={Boolean(activeJourney)}
+                            className="text-[11px] text-emerald-400 hover:underline disabled:text-slate-600 disabled:no-underline flex items-center gap-1 font-semibold"
                           >
-                            <Icon name="leaf" className="w-3.5 h-3.5" /> Log Trip (+1.8kg CO₂)
+                            <Icon name="route" className="w-3.5 h-3.5" /> {t('startJourney')}
                           </button>
 
                           <button
@@ -1097,7 +2498,7 @@
                             className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow"
                           >
                             <Icon name="bookmark" className="w-3.5 h-3.5" />
-                            Bookmark Route
+                            {t('bookmarkRoute')}
                           </button>
                         </div>
                       </div>
@@ -1108,11 +2509,11 @@
                   <div className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
                     <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                       <Icon name="map-pin" className="w-4 h-4 text-red-400" />
-                      Places Near {STATIONS_DATA[destination]?.name}
+                      {t('placesNear', { station: stationsData[destination]?.name || '' })}
                     </h2>
 
                     <div className="space-y-2">
-                      {(YELP_VENUES_DATABASE[destination] || YELP_VENUES_DATABASE['TSQ']).map(v => (
+                      {(YELP_VENUES_DATABASE[destination] || YELP_VENUES_DATABASE['127']).map(v => (
                         <div key={v.id} className="p-3 rounded-xl border border-slate-800 bg-slate-900/60 flex items-center justify-between gap-3 text-xs">
                           <div className="flex items-center space-x-3">
                             <span className="text-xl">{v.image}</span>
@@ -1140,7 +2541,7 @@
                     <div className="flex items-center justify-between">
                       <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                         <Icon name="map" className="w-4 h-4 text-blue-400" />
-                        Interactive Transit Map
+                        {t('interactiveMap')}
                       </h2>
 
                       <button
@@ -1148,7 +2549,7 @@
                         className="text-xs text-slate-400 hover:text-white underline flex items-center gap-1"
                       >
                         <Icon name="list" className="w-3.5 h-3.5" />
-                        {useAltMap ? 'Show Map View' : 'Station List View'}
+                        {useAltMap ? t('mapView') : t('stationListView')}
                       </button>
                     </div>
 
@@ -1156,10 +2557,10 @@
                       <div ref={mapContainerRef} className="h-[440px] w-full rounded-xl border border-slate-800 shadow-inner"></div>
                     ) : (
                       <div className="p-4 rounded-xl border border-slate-800 bg-slate-900 space-y-2 text-xs">
-                        <p className="font-bold text-slate-300">Station Overview List:</p>
-                        {Object.values(STATIONS_DATA).map(s => (
+                        <p className="font-bold text-slate-300">{t('stationListView')}:</p>
+                        {stationOptions.map(s => (
                           <div key={`alt-${s.id}`} className="p-2 border-b border-slate-800 flex justify-between items-center">
-                            <span>{s.name} ({s.borough})</span>
+                            <span>{s.name}{s.borough ? ` (${s.borough})` : ''}</span>
                             <div className="flex gap-1 items-center">
                               {s.lines.map((l, i) => (
                                 <LineBadge key={i} line={l} size="w-4 h-4 text-[9px]" />
@@ -1174,23 +2575,44 @@
                   {/* Live Service Alerts & Elevator Monitor */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     
-                    {/* Train Service Alerts */}
+                    {/* Live GTFS-Realtime train updates */}
                     <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-                        <Icon name="alert-triangle" className="w-4 h-4" />
-                        Subway Service Alerts
-                      </h3>
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                          <Icon name="radio" className="w-4 h-4" />
+                          {t('liveTrainUpdates')}
+                        </h3>
+                        <span className="text-[10px] text-emerald-400 font-mono">
+                          {t('trips', { count: liveTrainCount })}
+                        </span>
+                      </div>
 
                       <div className="space-y-2 text-xs">
-                        {INITIAL_GTFS_ALERTS.map(alt => (
-                          <div key={alt.id} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                        {liveDataError && (
+                          <p className="text-[11px] text-amber-400">{t(liveDataError)}</p>
+                        )}
+                        {!liveDataError && liveTrains.length === 0 && (
+                          <p className="text-[11px] text-slate-500">{t('waitingLive')}</p>
+                        )}
+                        {liveTrains.slice(0, 4).map((train, index) => (
+                          <div key={`${train.tripId || train.routeId}-${index}`} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
                             <div className="flex items-center gap-2 font-bold text-white">
-                              <LineBadge line={alt.line} isExpress={alt.isExpress} size="w-5 h-5 text-[10px]" />
-                              <span>{alt.title}</span>
+                              <LineBadge line={displayRouteId(train.routeId)} size="w-5 h-5 text-[10px]" />
+                              <span>{train.nextStop?.stopName || '—'}</span>
+                              <span className="ml-auto text-amber-400 font-mono">
+                                {formatEpochTime(train.nextStop?.arrivalTime || train.nextStop?.departureTime)}
+                              </span>
                             </div>
-                            <p className="text-[11px] text-slate-400">{alt.desc}</p>
+                            <p className="text-[10px] text-slate-500 font-mono truncate">
+                              {t('trip', { id: train.tripId || '—' })}
+                            </p>
                           </div>
                         ))}
+                        {liveFetchedAt && (
+                          <p className="text-[10px] text-slate-600 text-right">
+                            {t('updatedAt', { time: new Date(liveFetchedAt).toLocaleTimeString() })}
+                          </p>
+                        )}
                       </div>
                     </div>
 
@@ -1198,16 +2620,27 @@
                     <div className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-3">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
                         <Icon name="accessibility" className="w-4 h-4" />
-                        Elevator & Escalator Updates
+                        {t('elevatorUpdates')}
                       </h3>
 
                       <div className="space-y-2 text-xs">
-                        {INITIAL_ELEVATOR_OUTAGES.map((out, i) => (
-                          <div key={i} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
-                            <p className="font-bold text-slate-200">{out.equipment}</p>
+                        {outageError && (
+                          <p className="text-[11px] text-amber-400">{t(outageError)}</p>
+                        )}
+                        {!outageError && outages.length === 0 && (
+                          <p className="text-[11px] text-emerald-400">{t('noOutages')}</p>
+                        )}
+                        {outages.slice(0, 4).map((out, i) => (
+                          <div key={`${out.equipmentId || out.equipment || 'outage'}-${i}`} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                            <p className="font-bold text-slate-200">
+                              {out.equipment || `${out.equipmentType || 'Equipment'} ${out.equipmentId || ''}`}
+                            </p>
+                            <p className="text-[10px] text-slate-400">
+                              {out.stationName || out.station || 'Station unavailable'}
+                            </p>
                             <div className="flex justify-between text-[11px]">
-                              <span className="text-red-400 font-semibold">{out.status}</span>
-                              <span className="text-slate-500">ETA: {out.estimatedReturn}</span>
+                              <span className="text-red-400 font-semibold">{out.status || out.reason || 'Unavailable'}</span>
+                              <span className="text-slate-500">ETA: {out.estimatedReturn || 'Unknown'}</span>
                             </div>
                           </div>
                         ))}
