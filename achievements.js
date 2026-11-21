@@ -15,7 +15,7 @@ function normalize(v){
 function stats(p){return {rides:p.trips.length,stations:new Set(p.trips.flatMap(t=>[t.origin,t.destination])).size,favorite:p.hasBookmarked?1:0};}
 function unlock(p,now){const totals=stats(p),unlocked={...p.unlocked};definitions.forEach(d=>{if(totals[d.metric]>=d.target&&!unlocked[d.id])unlocked[d.id]=now;});return {...p,unlocked};}
 function start(p,origin,destination,id){return {...p,active:{id,origin,destination}};}
-function complete(p,now){const j=p.active;if(!j||j.origin===j.destination||p.trips.some(t=>t.id===j.id))return p;return unlock({...p,trips:[...p.trips,{...j,completedAt:now}]},now);}
+function complete(p,now,carbon){const j=p.active;if(!j||j.origin===j.destination||p.trips.some(t=>t.id===j.id))return p;const recorded=carbon===undefined?{}:{carbon:scope.MetroCarbon.snapshot(carbon)};return unlock({...p,trips:[...p.trips,{...j,completedAt:now,...recorded}]},now);}
 function bookmark(p,now){return unlock({...p,hasBookmarked:true},now);}
 scope.MetroAchievements={definitions,empty,normalize,stats,start,complete,bookmark};
 })(globalThis);

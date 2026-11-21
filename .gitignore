@@ -1,0 +1,2 @@
+# Downloaded GTFS archives are build inputs; commit the generated network instead.
+data/*.zip

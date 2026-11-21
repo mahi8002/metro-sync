@@ -1,0 +1,43 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+for (const name of ['carbon.js', 'achievements.js']) vm.runInThisContext(fs.readFileSync(path.join(__dirname, '..', name), 'utf8'));
+const C = globalThis.MetroCarbon, A = globalThis.MetroAchievements;
+const input = { drivingDistance: '10', transitDistance: '10', unit: 'km', baselineMode: 'solo-petrol-car', distanceSource: 'Verified trip planner routes' };
+const result = C.estimate(input);
+assert.ok(C.validSnapshot(result));
+assert.ok(Math.abs(result.estimatedSavingsKgCO2e - (1.12 - 0.11) * 0.45359237 / 1.609344 * 10) < 1e-10);
+const miles = C.estimate({ ...input, drivingDistance: 1, transitDistance: 1, unit: 'mi' });
+assert.ok(Math.abs(miles.estimatedSavingsKgCO2e - 1.01 * 0.45359237) < 1e-10);
+for (const value of ['', ' ', null, false, [], {}, 'Infinity', Infinity, -1, 0, '1,000', '1e2', 2001]) {
+  assert.equal(C.estimate({ ...input, drivingDistance: value }).status, 'unavailable');
+}
+assert.equal(C.estimate({ ...input, unit: 'yards' }).status, 'unavailable');
+assert.equal(C.estimate({ ...input, distanceSource: '' }).status, 'unavailable');
+assert.equal(C.estimate({ ...input, baselineMode: 'walking' }).status, 'unavailable');
+assert.ok(C.estimate({ ...input, drivingDistance: 1, transitDistance: 100 }).estimatedSavingsKgCO2e < 0);
+const now = '2026-11-14T12:00:00Z';
+let legacy = A.complete(A.start(A.empty(), 'TSQ', 'BARC', 'old'), now);
+legacy = A.bookmark(legacy, now);
+const original = JSON.stringify(legacy);
+let progress = A.complete(A.start(legacy, 'TSQ', 'PENN', 'new'), now, result);
+result.estimatedSavingsKgCO2e = 999; // Stored snapshot must not retain a mutable input reference.
+assert.notEqual(progress.trips[1].carbon.estimatedSavingsKgCO2e, 999);
+assert.equal(JSON.stringify(legacy), original);
+assert.deepEqual(progress.trips[0], legacy.trips[0]);
+assert.deepEqual(progress.unlocked, legacy.unlocked);
+assert.equal(A.stats(progress).rides, 2);
+assert.equal(A.stats(progress).stations, 3);
+assert.equal(A.complete(progress, now, C.estimate(input)).trips.length, 2);
+const restored = A.normalize(JSON.parse(JSON.stringify(progress)));
+assert.deepEqual(restored, progress);
+assert.equal(C.summarize(restored.trips).estimatedJourneys, 1);
+assert.equal(C.summarize(restored.trips).unestimatedJourneys, 1);
+assert.equal(C.summarize(legacy.trips).estimatedJourneys, 0);
+const tampered = { ...C.estimate(input), estimatedSavingsKgCO2e: 1000 };
+assert.equal(C.validSnapshot(tampered), false);
+progress = A.complete(A.start(progress, 'TSQ', 'GCT', 'missing'), now, C.estimate(null));
+assert.equal(A.stats(progress).rides, 3);
+assert.equal(C.summarize(progress.trips).estimatedJourneys, 1);
+console.log('PASS: sourced distance formula, units, invalid inputs, negative comparisons, immutable snapshots, legacy persistence, achievement compatibility and duplicate protection');

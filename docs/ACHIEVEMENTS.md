@@ -1,5 +1,10 @@
 # Local achievements MVP
 
+Automatic distance update: new trips can save automatic GTFS/OSRM CO2e estimates
+without manual mileage. Existing badges, trips and manual estimates are retained.
+See [AUTOMATIC-DISTANCES.md](AUTOMATIC-DISTANCES.md) for setup, caveats and tests.
+Arrival confirmation now uses an accessible in-page dialog; Cancel records nothing.
+
 Open Metro Sync_v2.1.1.html through a local static HTTP server (keep achievements.js beside it). The page still requires its existing CDN dependencies.
 
 Six badges: first / 5 / 20 completed journeys, 5 / 10 unique endpoint stations, and first explicitly bookmarked route. Demo favorites are not counted automatically. Line achievements are deferred until routing supplies trustworthy line data.
@@ -14,3 +19,5 @@ Validation: node tests/achievements.test.cjs
 Manual smoke check: complete a journey, dismiss its unlock, open Profile & Favorites, reload and verify persistence, bookmark a route, and start another journey. Canceling the confirmation must leave progress unchanged.
 
 Existing routing/data issues and map view lifecycle are outside this feature change.
+
+Distance-based CO2e comparisons now replace the fixed per-journey estimate. See [CO2-ESTIMATES.md](CO2-ESTIMATES.md) for assumptions, history compatibility and verification steps. Run node tests/carbon.test.cjs as well as the existing achievement tests.

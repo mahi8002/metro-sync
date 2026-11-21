@@ -113,6 +113,10 @@
     }
   </script>
 
+  <script src="./distance-config.js"></script>
+  <script src="./distance.js"></script>
+  <script src="./carbon.js"></script>
+  <script src="./eco-score.js"></script>
   <script src="./achievements.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
@@ -133,6 +137,34 @@
 
       return <span ref={containerRef} className="inline-flex items-center justify-center" {...props} />;
     };
+
+    // Click/tap/keyboard disclosure: rider copy first, calculation details on demand.
+    const EcoInfo = ({ title, headingId, label, children }) => {
+      const [open, setOpen] = useState(false);
+      const panelId = React.useId();
+      return <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 id={headingId} className="font-bold text-white">{title}</h2>
+          <button type="button" aria-label={label} title={label} aria-expanded={open} aria-controls={panelId}
+            onClick={() => setOpen(value => !value)}
+            className="w-8 h-8 shrink-0 rounded-full border border-slate-600 text-blue-300 text-lg hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">ⓘ</button>
+        </div>
+        <div id={panelId} hidden={!open} role="region" aria-label={label} className="p-4 rounded-xl border border-slate-700 bg-slate-900 space-y-3 text-xs text-slate-300">{children}</div>
+      </div>;
+    };
+    const EcoMethodNotes = () => <div className="space-y-3">
+      <h3 className="font-semibold text-white">How we estimate your impact</h3>
+      <p>We compare this subway trip with one person driving a petrol car between the same stations. It is an estimated comparison, not proof that a car journey was avoided.</p>
+      <p>Estimated kg CO₂e saved = driving km × {MetroCarbon.FACTORS.carKgPerKm.toFixed(4)} − subway km × {MetroCarbon.FACTORS.subwayKgPerKm.toFixed(4)}. CO₂e includes greenhouse gases expressed as a carbon dioxide equivalent. Negative values mean higher estimated emissions.</p>
+      <p>Subway distances follow MTA GTFS track shapes, excluding walks. Driving distances come from OSRM road routes. Only public station coordinates are sent; we do not use GPS location.</p>
+      <p>Factors come from <a className="underline text-blue-300" href={MetroCarbon.FACTORS.source} target="_blank" rel="noopener noreferrer">MTA Climate Sustainability Framework (2023), slide 3</a>, using 2020 averages: 1.12 lb CO₂e/passenger-mile for a solo petrol car and 0.11 for subway. They are operational averages, not current line-specific measurements or full life-cycle emissions.</p>
+      <p>Subway suggestions use normal-service patterns, not live departures or closures. Travel times do not include live waiting. Actual emissions vary with the vehicle, electricity and passenger load. The public road-routing demo may be unavailable.</p>
+      <h3 className="font-semibold text-white">What your Eco score means</h3>
+      <p>More estimated carbon savings mean a higher score. Score = 100 × positive kg CO₂e saved / (positive kg CO₂e saved + 2). The 2 kg scale is a product design choice, not a scientific coefficient or certified rating. A longer detour with the same endpoints does not earn extra credit. Missing data is unscored; non-positive savings score zero.</p>
+      <p>Candidate routes are ordered by estimated savings, with travel time breaking ties. Scores are per journey, not cumulative reward points. Selecting a different route does not automatically record a trip.</p>
+      <h3 className="font-semibold text-white">Your saved progress</h3>
+      <p>Confirm arrival to save the estimate and score. Older records are kept; trips without distance data are not recalculated. Records are self-reported and saved in this browser, shared across demo accounts, with no cloud sync.</p>
+    </div>;
 
     // Official MTA Trunk Line Palette Specs
     const MTA_LINE_COLORS = {
@@ -251,45 +283,6 @@
       return `Subterranean Assistant (Offline Mode): I can answer questions instantly about elevator accessibility, current subway line delays, fastest transfer options, or nearby food at ${destSt?.name}.`;
     };
 
-    // 👇 插入这段代码 👇
-    class PriorityQueue {
-      constructor() { this.values = []; }
-      enqueue(val, priority) { this.values.push({ val, priority }); this.sort(); }
-      dequeue() { return this.values.shift(); }
-      sort() { this.values.sort((a, b) => a.priority - b.priority); }
-      isEmpty() { return this.values.length === 0; }
-    }
-
-    const findShortestPath = (graph, startNode, endNode) => {
-      const distances = {}; const previous = {}; const pq = new PriorityQueue();
-      Object.keys(graph).forEach(node => {
-        distances[node] = node === startNode ? 0 : Infinity; previous[node] = null;
-      });
-      pq.enqueue(startNode, 0);
-
-      while (!pq.isEmpty()) {
-        const { val: current } = pq.dequeue();
-        if (current === endNode) break;
-        const neighbors = graph[current] || [];
-        neighbors.forEach(neighbor => {
-          const time = distances[current] + neighbor.time;
-          if (time < distances[neighbor.to]) {
-            distances[neighbor.to] = time;
-            previous[neighbor.to] = { station: current, time: neighbor.time, line: neighbor.line };
-            pq.enqueue(neighbor.to, time);
-          }
-        });
-      }
-      if (distances[endNode] === Infinity) return null;
-      const path = []; let curr = endNode;
-      while (curr !== startNode) {
-        if (!previous[curr]) break;
-        path.unshift({ station: curr, ...previous[curr] });
-        curr = previous[curr].station;
-      }
-      return { totalTime: distances[endNode], path };
-    };
-
     const TRANSIT_GRAPH = {
       'CPS': [{ to: 'TSQ', line: '1', time: 240 }, { to: 'TSQ', line: 'A', time: 300 }],
       'TSQ': [{ to: 'CPS', line: '1', time: 240 }, { to: 'HUDSON', line: '7', time: 120 }, { to: 'GCT', line: '7', time: 300 }, { to: 'PENN', line: '1', time: 180 }, { to: 'HERALD', line: 'N', time: 360 }],
@@ -375,7 +368,48 @@
       const [achievementNotice, setAchievementNotice] = useState([]);
       const knownUnlocks = useRef(new Set(Object.keys(achievementProfile.unlocked)));
       const achievementStats = MetroAchievements.stats(achievementProfile);
-      const ecoMetrics = { totalRides: achievementStats.rides, co2SavedKg: (achievementStats.rides * 1.8).toFixed(1) };
+      const carbonSummary = MetroCarbon.summarize(achievementProfile.trips);
+      const ecoMetrics = { totalRides: achievementStats.rides, co2SavedKg: carbonSummary.estimatedJourneys ? carbonSummary.savingsKgCO2e.toFixed(2) : null };
+      const [carbonDraft, setCarbonDraft] = useState(null);
+      const [pendingCompletion, setPendingCompletion] = useState(null);
+      const completionTriggerRef = useRef(null);
+      const [distanceMode, setDistanceMode] = useState('automatic');
+      const comparisonMode = 'solo-petrol-car';
+      const [roadState, setRoadState] = useState({ status: 'loading' });
+      const [roadRetry, setRoadRetry] = useState(0);
+      const [transitRetry, setTransitRetry] = useState(0);
+      const [transitError, setTransitError] = useState('');
+      const [transitState, setTransitState] = useState(null);
+      const roadClient = useMemo(() => MetroDistance.createRoadClient({ endpoint: globalThis.MetroDistanceConfig?.roadEndpoint }), []);
+      const stationPairKey = origin + '>' + destination;
+      const changeStation = (field, value) => {
+        if (!STATIONS_DATA[value] || value === (field === 'origin' ? origin : destination)) return;
+        // Invalidate rendered results in the same event as the selection. Some
+        // native selects emit input before change, so subscribe to both below.
+        setRouteResults([]); setSelectedRouteOption(0); setTransitError('');
+        setRoadState({ status: 'loading' });
+        setCarbonDraft(null);
+        if (field === 'origin') setOrigin(value); else setDestination(value);
+      };
+      const selectedItinerary = routeResults.find(r => r.id === selectedRouteOption);
+      const currentItinerary = selectedItinerary?.originId === STATIONS_DATA[origin].mta_id && selectedItinerary?.destinationId === STATIONS_DATA[destination].mta_id ? selectedItinerary : null;
+      const carbonRouteKey = stationPairKey + ':' + (currentItinerary?.routeKey || 'unavailable');
+      const carbonInput = carbonDraft?.routeKey === carbonRouteKey ? carbonDraft : { unit: 'km', baselineMode: comparisonMode, drivingDistance: '', transitDistance: '', distanceSource: '' };
+      const roadIsCurrent = roadState.pairKey === stationPairKey;
+      const carbonEstimate = distanceMode === 'manual' ? MetroCarbon.estimate({ ...carbonInput, baselineMode: comparisonMode }) :
+        origin === destination ? { status: 'unavailable', reason: 'Choose two different stations.' } :
+        !currentItinerary ? { status: 'unavailable', reason: transitError || 'Loading subway route distances…' } :
+        !roadIsCurrent || roadState.status === 'loading' ? { status: 'unavailable', reason: 'Calculating driving distance…' } :
+        roadState.status === 'error' ? { status: 'unavailable', reason: roadState.error } :
+        MetroCarbon.estimateAutomatic(currentItinerary, roadState.data, comparisonMode);
+      const selectedEcoScore = MetroEcoScore.fromSnapshot(carbonEstimate);
+      const matchingRoutes = routeResults.filter(r => r.originId === STATIONS_DATA[origin].mta_id && r.destinationId === STATIONS_DATA[destination].mta_id);
+      const routeCards = distanceMode === 'automatic' && roadIsCurrent && roadState.status === 'ready'
+        ? MetroEcoScore.rankRoutes(matchingRoutes, roadState.data)
+        : matchingRoutes.map(r => ({ ...r, ecoScore: distanceMode === 'manual' && r.id === selectedRouteOption ? selectedEcoScore : null, ecoRecommended: false }));
+      const updateCarbonInput = (field, value) => setCarbonDraft({ ...carbonInput, routeKey: carbonRouteKey, [field]: value });
+      useEffect(() => { setCarbonDraft(null); }, [carbonRouteKey]);
+      useEffect(() => { if (!pendingCompletion) completionTriggerRef.current?.focus(); }, [pendingCompletion]);
       const journeyCompleted = achievementProfile.active?.origin === origin && achievementProfile.active?.destination === destination && achievementProfile.trips.some(t => t.id === achievementProfile.active.id);
       const journeyId = () => window.crypto?.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
       useEffect(() => {
@@ -383,7 +417,13 @@
         setAchievementProfile(prev => prev.active?.origin === origin && prev.active?.destination === destination ? prev : MetroAchievements.start(prev, origin, destination, id));
       }, [origin, destination]);
       useEffect(() => {
-        try { localStorage.setItem('metro_sync_achievements_v1', JSON.stringify(achievementProfile)); }
+        try {
+          const previous = localStorage.getItem('metro_sync_achievements_v1');
+          if (previous && localStorage.getItem('metro_sync_achievements_before_distance_v1') === null) {
+            localStorage.setItem('metro_sync_achievements_before_distance_v1', previous);
+          }
+          localStorage.setItem('metro_sync_achievements_v1', JSON.stringify(achievementProfile));
+        }
         catch { setStorageWarning('Storage unavailable or full. Changes may be lost on reload.'); }
         const newlyUnlocked = MetroAchievements.definitions.filter(d => achievementProfile.unlocked[d.id] && !knownUnlocks.current.has(d.id));
         if (newlyUnlocked.length) setAchievementNotice(prev => [...prev, ...newlyUnlocked]);
@@ -423,15 +463,37 @@
 
       const [lang, setLang] = useState('en');
       const [geoData, setGeoData] = useState({ lines: null, stations: null });
-      const [transitGraph, setTransitGraph] = useState(null);
+
       const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
 
       useEffect(() => {
-        fetch('./full_graph.json').then(res => res.json()).then(data => setTransitGraph(data)).catch(console.error);
-      }, []);
+        const controller = new AbortController();
+        setTransitState(null); setTransitError('');
+        fetch('./data/transit-network.json', { signal: controller.signal })
+          .then(response => { if (!response.ok) throw new Error('Subway data could not be loaded.'); return response.json(); })
+          .then(data => { if (!controller.signal.aborted) setTransitState(MetroDistance.prepare(data)); })
+          .catch(error => { if (!controller.signal.aborted) setTransitError(error.message); });
+        return () => controller.abort();
+      }, [transitRetry]);
 
       useEffect(() => {
-        if (currentView !== 'map' || useAltMap || !mapContainerRef.current) return;
+        if (origin === destination || !transitState) return;
+        const controller = new AbortController();
+        const from = transitState.network.stops[STATIONS_DATA[origin].mta_id];
+        const to = transitState.network.stops[STATIONS_DATA[destination].mta_id];
+        setRoadState({ pairKey: stationPairKey, status: 'loading' });
+        roadClient.get(from, to, { signal: controller.signal })
+          .then(data => { if (!controller.signal.aborted) setRoadState({ pairKey: stationPairKey, status: 'ready', data }); })
+          .catch(error => { if (!controller.signal.aborted) setRoadState({ pairKey: stationPairKey, status: 'error', error: error.message }); });
+        return () => controller.abort();
+      }, [origin, destination, transitState, roadRetry, roadClient]);
+
+      useEffect(() => {
+        if (currentView !== 'map' || useAltMap || !mapContainerRef.current) {
+          if (mapInstanceRef.current) mapInstanceRef.current.remove();
+          mapInstanceRef.current = null; markersGroupRef.current = null; polylineRef.current = null;
+          return;
+        }
 
         if (!mapInstanceRef.current) {
           const map = L.map(mapContainerRef.current, { center: [40.730, -73.980], zoom: 11, zoomControl: true });
@@ -449,7 +511,7 @@
           const stations = await stationsRes.json();
           setGeoData({ lines, stations });
         };
-        if (!geoData.lines) loadGeoJSON();
+        if (!geoData.lines) loadGeoJSON().catch(error => console.warn('Background map overlays unavailable:', error.message));
       }, [currentView, useAltMap]);
 
       // 渲染 GeoJSON
@@ -459,7 +521,7 @@
 
         L.geoJSON(geoData.lines, {
           style: (feature) => ({ color: HEX_LINE_COLORS[feature.properties.route_id] || '#808080', weight: 4, opacity: 0.8 })
-        }).addTo(mapInstanceRef.current);
+        }).addTo(markersGroupRef.current);
 
         L.geoJSON(geoData.stations, {
           pointToLayer: (feature, latlng) => {
@@ -475,56 +537,28 @@
             layer.bindPopup(`<div class="text-xs"><b>${name}</b><br/>${lines}</div>`);
           }
         }).addTo(markersGroupRef.current);
-      }, [geoData]);
+      }, [geoData, currentView, useAltMap]);
 
 
-      // Route Calculation & Polyline Visualizer
+      // A real static GTFS itinerary supplies both the route card and its track km.
       useEffect(() => {
-        if (origin === destination) { setRouteResults([]); return; }
+        if (!transitState || origin === destination) { setRouteResults([]); return; }
+        try {
+          const options = MetroDistance.planRoutes(transitState, STATIONS_DATA[origin].mta_id, STATIONS_DATA[destination].mta_id);
+          setRouteResults(options); setSelectedRouteOption(0);
+          setTransitError(options.length ? '' : 'No connected subway itinerary was found.');
+        } catch (error) { setRouteResults([]); setTransitError(error.message); }
+      }, [origin, destination, transitState]);
 
-        let result = null;
-        if (transitGraph) {
-          const startMtaId = STATIONS_DATA[origin].mta_id;
-          const endMtaId = STATIONS_DATA[destination].mta_id;
-          result = findShortestPath(transitGraph, startMtaId, endMtaId);
-        }
-
-        if (result && result.path.length > 0) {
-          const usedLines = [...new Set(result.path.map(p => p.line))].filter(Boolean);
-          const steps = result.path.map((step, i) => {
-            const from = i === 0 ? STATIONS_DATA[origin].name : `Station ${result.path[i-1].station}`;
-            return `Ride from ${from} to Station ${step.station} (${Math.round(step.time/60)} mins)`;
-          });
-
-          setRouteResults([{
-            id: 0,
-            title: "Fastest Route (Real GTFS)",
-            duration: Math.round(result.totalTime / 60),
-            transfers: usedLines.length > 1 ? usedLines.length - 1 : 0,
-            isAda: false,
-            lines: usedLines.slice(0, 3),
-            isExpress: usedLines.map(() => false),
-            steps: steps.slice(0, 6)
-          }]);
-        } else {
-          setRouteResults([{ id: 0, title: "Option 1: Express Route", duration: 18, transfers: 1, isAda: true, lines: ['N', 'Q'], isExpress: [true, false], steps: ["Board N Express", "Transfer to Q", "Arrive"] }]);
-        }
-
-        // 👇 新增：绘制地图上的连线
-        if (mapInstanceRef.current) {
-          if (polylineRef.current) mapInstanceRef.current.removeLayer(polylineRef.current);
-          const startSt = STATIONS_DATA[origin]; const endSt = STATIONS_DATA[destination];
-          if (startSt && endSt) {
-            const midLat = (startSt.lat + endSt.lat) / 2 + 0.005;
-            const midLng = (startSt.lng + endSt.lng) / 2 - 0.005;
-            const latLngs = [[startSt.lat, startSt.lng], [midLat, midLng], [endSt.lat, endSt.lng]];
-            const activeLine = result && result.path.length > 0 ? result.path[0].line : '1';
-            polylineRef.current = L.polyline(latLngs, { color: HEX_LINE_COLORS[activeLine] || '#3b82f6', weight: 5, opacity: 0.85, dashArray: '8, 8' }).addTo(mapInstanceRef.current);
-            mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
-          }
-        }
-      }, [origin, destination, transitGraph]);
-
+      useEffect(() => {
+        if (!mapInstanceRef.current) return;
+        if (polylineRef.current) { mapInstanceRef.current.removeLayer(polylineRef.current); polylineRef.current = null; }
+        if (!currentItinerary?.polyline.length) return;
+        polylineRef.current = L.polyline(currentItinerary.polyline, {
+          color: HEX_LINE_COLORS[currentItinerary.lines[0]] || '#3b82f6', weight: 5, opacity: .9
+        }).addTo(mapInstanceRef.current);
+        mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
+      }, [currentItinerary, currentView, useAltMap, geoData]);
 
       // Sign-In Handlers
       const handleAuthSubmit = (e) => {
@@ -595,8 +629,8 @@
       };
 
       const handleLoadRoute = (fav) => {
-        setOrigin(fav.originId);
-        setDestination(fav.destId);
+        changeStation('origin', fav.originId);
+        changeStation('destination', fav.destId);
         setCurrentView('map');
         showToast(`Loaded "${fav.nickname}" on map!`);
       };
@@ -606,7 +640,9 @@
         setTimeout(() => setToastMsg(''), 3000);
       };
 
-      const handleLogTrip = () => {
+      const handleLogTrip = (event, optionId) => {
+        event.stopPropagation();
+        if (optionId !== selectedRouteOption) { setSelectedRouteOption(optionId); showToast('Route selected. Review its distance estimate before completing.'); return; }
         if (origin === destination) return;
         if (journeyCompleted) {
           const id = journeyId();
@@ -614,9 +650,16 @@
           showToast('New journey started. Confirm completion after arrival.');
           return;
         }
-        if (!window.confirm('Have you completed this journey? Only the origin and destination count as visited. This is a self-reported record.')) return;
+        const snapshot = optionId === selectedRouteOption && (distanceMode === 'manual' || currentItinerary) ? carbonEstimate : { status: 'unavailable', reason: 'Select this itinerary before recording its estimate.' };
+        completionTriggerRef.current = event.currentTarget;
+        setPendingCompletion({ journeyId: achievementProfile.active?.id, snapshot: MetroEcoScore.attach(snapshot) });
+      };
+      const confirmJourneyCompletion = () => {
+        if (!pendingCompletion) return;
+        const { journeyId: recordedJourneyId, snapshot } = pendingCompletion;
         const now = new Date().toISOString();
-        setAchievementProfile(prev => MetroAchievements.complete(prev, now));
+        setAchievementProfile(prev => prev.active?.id === recordedJourneyId ? MetroAchievements.complete(prev, now, snapshot) : prev);
+        setPendingCompletion(null);
       };
 
       // Assistant Message Submission
@@ -634,6 +677,25 @@
 
       return (
         <div className={`min-h-screen transition-colors duration-200 ${highContrast ? 'bg-black text-yellow-300 font-mono' : 'bg-slate-900 text-slate-100 font-sans'}`}>
+          {pendingCompletion && <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4">
+            <section role="dialog" aria-modal="true" aria-labelledby="complete-journey-title" className="max-w-md w-full bg-slate-900 text-slate-100 border border-slate-600 rounded-2xl p-6 space-y-4"
+              onKeyDown={event => {
+                if (event.key === 'Escape') setPendingCompletion(null);
+                if (event.key === 'Tab') {
+                  const buttons = event.currentTarget.querySelectorAll('button');
+                  if (event.shiftKey && document.activeElement === buttons[0]) { event.preventDefault(); buttons[buttons.length - 1].focus(); }
+                  else if (!event.shiftKey && document.activeElement === buttons[buttons.length - 1]) { event.preventDefault(); buttons[0].focus(); }
+                }
+              }}>
+              <h2 id="complete-journey-title" className="font-bold text-lg">Confirm journey completion</h2>
+              <p className="text-sm">Have you arrived? This is a self-reported journey; only its origin and destination count as visited.</p>
+              <p className="text-sm">{pendingCompletion.snapshot.status === 'estimated' ? pendingCompletion.snapshot.estimatedSavingsKgCO2e.toFixed(2) + ' kg CO₂e estimated difference and its Eco score will be saved with this journey.' : 'No CO₂e estimate is available. The journey will still count toward badges.'}</p>
+              <div className="flex justify-end gap-3">
+                <button autoFocus onClick={() => setPendingCompletion(null)} className="px-4 py-2 rounded border border-slate-600">Cancel</button>
+                <button onClick={confirmJourneyCompletion} className="px-4 py-2 rounded bg-blue-600 text-white font-bold">Confirm arrival</button>
+              </div>
+            </section>
+          </div>}
 
           {storageWarning && <div role="alert" className="p-3 bg-amber-950 text-amber-200 text-sm">{storageWarning}</div>}
           {achievementNotice.length > 0 && (
@@ -921,12 +983,28 @@
                       <p className="text-base font-bold text-white">{ecoMetrics.totalRides}</p>
                     </div>
                     <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                      <p className="text-xs text-slate-400">Estimated CO₂ Saved</p>
-                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg} kg</p>
+                      <p className="text-xs text-slate-400">Estimated CO₂e Avoided</p>
+                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg === null ? 'Not estimated' : ecoMetrics.co2SavedKg + ' kg'}</p>
                     </div>
                   </div>
                 </div>
 
+                <section aria-labelledby="carbon-summary-title" className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 space-y-3 text-xs text-slate-300">
+                  <EcoInfo title="Your greener trips" headingId="carbon-summary-title" label="About your saved carbon estimates"><EcoMethodNotes /></EcoInfo>
+                  <p>Carbon estimates available for {carbonSummary.estimatedJourneys} of your {achievementStats.rides} completed trips. Every completed trip counts toward your badges.</p>
+                                    <details><summary className="cursor-pointer text-blue-300">Your trip history</summary>
+                    <p className="mt-2">Your latest 20 completed trips. Earlier trips are still saved.</p>
+                    <ul className="space-y-3 mt-3">{achievementProfile.trips.slice(-20).reverse().map(trip => <li key={trip.id} className="p-3 rounded border border-slate-700">
+                      <p>{STATIONS_DATA[trip.origin]?.name || trip.origin} → {STATIONS_DATA[trip.destination]?.name || trip.destination} · {new Date(trip.completedAt).toLocaleString()}</p>
+                      {MetroCarbon.validSnapshot(trip.carbon) ? <div>
+                        <p>{trip.carbon.estimatedSavingsKgCO2e.toFixed(2)} kg CO₂e avoided · driving {trip.carbon.drivingDistanceKm.toFixed(2)} km / subway {trip.carbon.transitDistanceKm.toFixed(2)} km</p>
+                        <p>Eco score: {MetroEcoScore.fromSnapshot(trip.carbon)?.value.toFixed(1)} / 100 </p>
+                        <details><summary className="cursor-pointer text-blue-300" aria-label="About this saved trip’s estimate">ⓘ About this estimate</summary><p className="mt-2">Distance source: {trip.carbon.distanceSource}. Model: {trip.carbon.methodVersion}; factor data: {trip.carbon.factorDataYear}.</p><p>{trip.carbon.ecoScore ? 'Score saved when this trip was completed.' : 'Score derived from the saved estimate; the original trip record is unchanged.'}</p></details>
+                      </div> : <p>No carbon estimate for this trip. It still counts toward your badges.</p>}
+                    </li>)}</ul>
+                  </details>
+
+                </section>
                 {/* Saved Favorite Routes */}
                 <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-4">
@@ -1012,7 +1090,7 @@
                     <h2 id="achievements-title" className="font-bold text-white">🏆 Your Achievements</h2>
                     <span className="text-sm text-amber-300">{Object.keys(achievementProfile.unlocked).length} / {MetroAchievements.definitions.length} unlocked</span>
                   </div>
-                  <p className="text-xs text-slate-400">Self-reported journeys • Saved on this browser only, shared across demo accounts. No cloud sync. Only confirmed origins and destinations count as visited.</p>
+                  <p className="text-xs text-slate-400">Confirm your trips to unlock badges. Your progress is saved on this browser.</p>
                   <p className="text-sm text-slate-300">{achievementStats.rides} completed journeys · {achievementStats.stations} unique stations</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {MetroAchievements.definitions.map(d => {
@@ -1026,7 +1104,7 @@
                       </article>;
                     })}
                   </div>
-                  <p className="text-xs text-slate-500">CO₂ savings are an illustrative estimate of 1.8 kg per journey, not a measured reduction.</p>
+                  <p className="text-xs text-slate-500">Keep exploring by subway—every completed trip counts toward your next badge.</p>
                 </section>
                 {/* Commute Preferences */}
                 <div className="p-6 rounded-2xl border border-slate-800 bg-slate-950/80 shadow-2xl space-y-4">
@@ -1080,7 +1158,8 @@
                         <label className="block text-slate-400 font-semibold mb-1">Start Station</label>
                         <select 
                           value={origin} 
-                          onChange={(e) => setOrigin(e.target.value)}
+                          onInput={(e) => changeStation('origin', e.target.value)}
+                          onChange={(e) => changeStation('origin', e.target.value)}
                           className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
                         >
                           {Object.values(STATIONS_DATA).map(s => (
@@ -1093,7 +1172,8 @@
                         <label className="block text-slate-400 font-semibold mb-1">Destination Station</label>
                         <select 
                           value={destination} 
-                          onChange={(e) => setDestination(e.target.value)}
+                          onInput={(e) => changeStation('destination', e.target.value)}
+                          onChange={(e) => changeStation('destination', e.target.value)}
                           className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-medium focus:outline-none focus:border-blue-500"
                         >
                           {Object.values(STATIONS_DATA).map(s => (
@@ -1104,9 +1184,59 @@
                     </div>
                   </div>
 
+                  <section aria-labelledby="carbon-input-title" className="p-4 rounded-2xl border border-slate-800 bg-slate-950/80 space-y-3 text-sm text-slate-300">
+                    <EcoInfo title="Your greener journey" headingId="carbon-input-title" label="How your carbon savings and Eco score are calculated">
+                      <EcoMethodNotes />
+                      <h3 className="font-semibold text-white">Distances for this trip</h3>
+                      <p>Current calculation: {STATIONS_DATA[origin].name} → {STATIONS_DATA[destination].name}</p>
+                      <p>Subway: {origin === destination ? 'Same station' : currentItinerary ? currentItinerary.transitDistanceKm.toFixed(2) + ' km' : transitError || 'Loading…'} · Driving: {origin === destination ? 'Same station' : roadIsCurrent && roadState.status === 'ready' ? roadState.data.drivingDistanceKm.toFixed(2) + ' km' : roadIsCurrent && roadState.status === 'error' ? 'Unavailable' : 'Calculating…'}</p>
+                      <p>Road provider: {globalThis.MetroDistanceConfig?.roadEndpoint || 'OSRM'}. Public demo service is for development and has no availability guarantee.</p>
+                      {carbonEstimate.status === 'estimated' ? <p>Driving: {carbonEstimate.carEmissionsKgCO2e.toFixed(2)} kg; subway: {carbonEstimate.transitEmissionsKgCO2e.toFixed(2)} kg CO₂e.</p> : <p>{carbonEstimate.reason}</p>}
+                      <label className="block">Distance calculation
+                        <select aria-label="Distance calculation mode" value={distanceMode} onChange={e => setDistanceMode(e.target.value)} className="block w-full p-2 mt-1 bg-slate-950 border border-slate-700 rounded">
+                          <option value="automatic">Automatic</option><option value="manual">Enter distances yourself</option>
+                        </select>
+                      </label>
+                      {distanceMode === 'manual' && <div className="space-y-3">
+                    <p>Backup only: enter verified distances and source for the selected itinerary.</p>
+                    <label className="block">Distance unit
+                      <select aria-label="CO2 distance unit" value={carbonInput.unit} onChange={e => { setCarbonDraft({ ...carbonInput, routeKey: carbonRouteKey, unit: e.target.value, drivingDistance: '', transitDistance: '' }); }} className="block w-full p-2 mt-1 bg-slate-900 border border-slate-700 rounded">
+                        <option value="km">Kilometres (km)</option><option value="mi">Miles (mi)</option>
+                      </select>
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label>Driving route distance ({carbonInput.unit})<input aria-label="Driving route distance" type="number" min="0" step="any" value={carbonInput.drivingDistance} onChange={e => updateCarbonInput('drivingDistance', e.target.value)} className="block w-full p-2 mt-1 bg-slate-900 border border-slate-700 rounded" /></label>
+                      <label>Subway distance, excluding walks ({carbonInput.unit})<input aria-label="Subway route distance" type="number" min="0" step="any" value={carbonInput.transitDistance} onChange={e => updateCarbonInput('transitDistance', e.target.value)} className="block w-full p-2 mt-1 bg-slate-900 border border-slate-700 rounded" /></label>
+                    </div>
+                    <label className="block">Distance source (route planner / map and itinerary)
+                      <input aria-label="Route distance source" maxLength="200" placeholder="e.g. route planner name and selected subway line" value={carbonInput.distanceSource} onChange={e => updateCarbonInput('distanceSource', e.target.value)} className="block w-full p-2 mt-1 bg-slate-900 border border-slate-700 rounded" />
+                    </label>
+                    </div>}
+
+                    </EcoInfo>
+                    <p className="text-xs text-slate-400">{STATIONS_DATA[origin].name} → {STATIONS_DATA[destination].name}</p>
+                    <p role="status" aria-live="polite" className="text-base font-semibold text-emerald-300">{
+                      origin === destination ? 'Choose different start and destination stations to see your impact.' :
+                      carbonEstimate.status === 'estimated' ? (
+                        carbonEstimate.estimatedSavingsKgCO2e > 0 ? '🌱 Taking the subway could save about ' + carbonEstimate.estimatedSavingsKgCO2e.toFixed(2) + ' kg CO₂e compared with driving alone.' :
+                        carbonEstimate.estimatedSavingsKgCO2e < 0 ? 'This subway trip is estimated to emit ' + Math.abs(carbonEstimate.estimatedSavingsKgCO2e).toFixed(2) + ' kg CO₂e more than driving alone.' :
+                        'This trip has similar estimated emissions to driving alone.'
+                      ) : distanceMode === 'manual' ? 'Add your trip distances using ⓘ to see your estimated savings.' :
+                        transitError || (roadIsCurrent && roadState.status === 'error') ? 'We couldn’t estimate this trip yet. Please try again.' : 'Working out your trip’s estimated savings…'
+                    }</p>
+                    {selectedEcoScore && <p className="font-semibold text-emerald-300">Eco score: {selectedEcoScore.value.toFixed(1)} / 100</p>}
+                    {distanceMode === 'automatic' && origin !== destination && <button className="text-xs underline text-blue-300" onClick={() => {
+                      roadClient.clearCache(); setRoadState({ status: 'loading' }); setRoadRetry(n => n + 1);
+                      if (transitError) setTransitRetry(n => n + 1);
+                    }}>{transitError || (roadIsCurrent && roadState.status === 'error') ? 'Try again' : 'Refresh estimate'}</button>}
+                  </section>
                   {/* Calculated Route Cards */}
+                  {transitError && origin !== destination && routeResults.length === 0 && <div className="p-4 rounded-xl border border-amber-700 text-sm text-amber-200 space-y-2">
+                    <p>We couldn’t find a route right now. Try again above, or record your completed trip without a carbon estimate.</p>
+                    <button className="underline" onClick={e => handleLogTrip(e, selectedRouteOption)}>{journeyCompleted ? 'Start Another Journey' : 'Complete Journey without route estimate'}</button>
+                  </div>}
                   <div className="space-y-3">
-                    {routeResults.map((opt) => (
+                    {routeCards.map((opt) => (
                       <div
                         key={opt.id}
                         onClick={() => setSelectedRouteOption(opt.id)}
@@ -1119,10 +1249,11 @@
                         <div className="flex items-start justify-between mb-2">
                           <div>
                             <h3 className="font-bold text-sm text-white flex items-center gap-2">
-                              {opt.title}
+                              {opt.title.replace('GTFS', 'subway')}
+                              {opt.ecoRecommended && <span className="text-[10px] text-emerald-300 bg-emerald-950 px-1.5 py-0.5 rounded border border-emerald-700">Eco recommendation</span>}
                               {opt.isAda && <span className="text-[10px] text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded border border-blue-800">♿ Accessible</span>}
                             </h3>
-                            <p className="text-xs text-slate-400 mt-0.5">{opt.duration} mins • {opt.transfers} transfer(s)</p>
+                            <p className="text-xs text-slate-400 mt-0.5">About {opt.duration} mins • {opt.transfers} transfer(s) • {opt.transitDistanceKm.toFixed(2)} km by subway</p>
                           </div>
                           <div className="flex items-center space-x-1.5">
                             {opt.lines.map((l, idx) => (
@@ -1136,6 +1267,7 @@
                           </div>
                         </div>
 
+                        <p className="text-sm font-semibold text-emerald-300">Eco score: {opt.ecoScore ? opt.ecoScore.value.toFixed(1) + ' / 100' : 'Unavailable'}</p>
                         {/* Step Details */}
                         <div className="space-y-1.5 my-3 pl-2 border-l-2 border-slate-800 text-xs text-slate-300">
                           {opt.steps.map((st, i) => (
@@ -1148,7 +1280,8 @@
                         {/* Actions */}
                         <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
                           <button
-                            onClick={handleLogTrip}
+                            onClick={(e) => handleLogTrip(e, opt.id)}
+                            disabled={!journeyCompleted && distanceMode === 'automatic' && (!roadIsCurrent || roadState.status === 'loading')}
                             className="text-[11px] text-emerald-400 hover:underline flex items-center gap-1 font-semibold"
                           >
                             <Icon name="leaf" className="w-3.5 h-3.5" /> {journeyCompleted ? 'Start Another Journey' : 'Complete Journey'}
