@@ -6,6 +6,7 @@ import csv from 'csv-parser';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = path.resolve(__dirname, '..', '..');
 const GTFS_DIR = path.join(PROJECT_DIR, 'gtfs_supplemented');
+const MAP_DATA_FILE = path.resolve(__dirname, '..', 'data', 'map.json');
 
 let mapCache = null;
 let mapPromise = null;
@@ -131,11 +132,32 @@ const buildMapData = async (stationLines) => {
   };
 };
 
-export async function getMapData(stationLines) {
+export { buildMapData, MAP_DATA_FILE };
+
+const loadPrebuilt = async () => {
+  try {
+    return JSON.parse(await fs.promises.readFile(MAP_DATA_FILE, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn(`[Map] Ignoring unreadable ${MAP_DATA_FILE}: ${error.message}`);
+    }
+    return null;
+  }
+};
+
+// Prefers data/map.json (see `npm run build:map`); otherwise builds from the
+// GTFS files, which streams ~10MB of CSV and is slow. `getStationLines` is only
+// called on that fallback path.
+export async function getMapData(getStationLines) {
   if (mapCache) return mapCache;
   if (mapPromise) return mapPromise;
 
-  mapPromise = buildMapData(stationLines)
+  mapPromise = (async () => {
+    const prebuilt = await loadPrebuilt();
+    if (prebuilt) return prebuilt;
+    console.warn('[Map] data/map.json not found, building from GTFS (slow). Run `npm run build:map`.');
+    return buildMapData(await getStationLines());
+  })()
     .then((result) => {
       mapCache = result;
       return result;

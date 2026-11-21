@@ -4,7 +4,7 @@ Last updated: November 7, 2026
 
 ## 1. Current Web Application Features
 
-The current `Metro Sync_v2.1.1.html` application provides:
+The current `Metro Sync_v2.1.2.html` application provides:
 
 - Full-network subway route planning using 496 GTFS parent stations,
   direction-specific platform mappings, transfer walking times, and route-aware

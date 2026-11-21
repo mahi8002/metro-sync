@@ -94,6 +94,16 @@
     ::-webkit-scrollbar-thumb:hover {
       background: #475569;
     }
+    .leaflet-tooltip.route-stop-label {
+      background: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #475569;
+      font-weight: 700;
+      font-size: 11px;
+      padding: 2px 6px;
+    }
+    .leaflet-tooltip-top.route-stop-label::before { border-top-color: #475569; }
+    .line-focus .route-layer-label { opacity: 0.2 !important; }
   </style>
 </head>
 <body>
@@ -177,6 +187,103 @@
         hour: '2-digit',
         minute: '2-digit'
       });
+    };
+
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+
+    // ---- Geometry helpers for following the real track -----------------------
+    const SHAPE_KX = 111320 * Math.cos((40.73 * Math.PI) / 180);
+    const SHAPE_KY = 110540;
+
+    // Closest point of a [lon, lat] polyline to a location: its position along
+    // the line (vertex index + fraction) and the distance in metres.
+    const projectOnShape = (coords, lon, lat) => {
+      let bestDist = Infinity;
+      let bestPos = 0;
+      const px = lon * SHAPE_KX;
+      const py = lat * SHAPE_KY;
+      for (let i = 0; i < coords.length - 1; i += 1) {
+        const ax = coords[i][0] * SHAPE_KX;
+        const ay = coords[i][1] * SHAPE_KY;
+        const dx = coords[i + 1][0] * SHAPE_KX - ax;
+        const dy = coords[i + 1][1] * SHAPE_KY - ay;
+        const len2 = dx * dx + dy * dy;
+        const frac = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+        const dist = Math.hypot(px - (ax + frac * dx), py - (ay + frac * dy));
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPos = i + frac;
+        }
+      }
+      return { dist: bestDist, pos: bestPos };
+    };
+
+    // [lat, lon] points of a polyline between two positions (either order).
+    const sliceShape = (coords, from, to) => {
+      const pointAt = (pos) => {
+        const i = Math.min(Math.floor(pos), coords.length - 2);
+        const t = pos - i;
+        return [
+          coords[i][1] + (coords[i + 1][1] - coords[i][1]) * t,
+          coords[i][0] + (coords[i + 1][0] - coords[i][0]) * t
+        ];
+      };
+      const out = [pointAt(from)];
+      if (from <= to) {
+        for (let i = Math.floor(from) + 1; i <= Math.floor(to); i += 1) out.push([coords[i][1], coords[i][0]]);
+      } else {
+        for (let i = Math.ceil(from) - 1; i >= Math.ceil(to); i -= 1) out.push([coords[i][1], coords[i][0]]);
+      }
+      out.push(pointAt(to));
+      return out;
+    };
+
+    // The stretch of the line's real shape that a ride covers, or null when no
+    // shape fits all of its stops (then the caller draws straight segments).
+    const followTrack = (stops, line, shapeFeatures) => {
+      if (!shapeFeatures || stops.length < 2) return null;
+      let best = null;
+      for (const feature of shapeFeatures) {
+        if (displayRouteId(feature.properties.route_id) !== line) continue;
+        const coords = feature.geometry.coordinates;
+        const positions = [];
+        let total = 0;
+        let fits = true;
+        for (const stop of stops) {
+          const { dist, pos } = projectOnShape(coords, stop.lon, stop.lat);
+          if (dist > 150) { fits = false; break; }
+          total += dist;
+          positions.push(pos);
+        }
+        if (!fits) continue;
+        const first = positions[0];
+        const last = positions[positions.length - 1];
+        if (first === last) continue;
+        const sign = last > first ? 1 : -1;
+        const monotonic = positions.every((pos, i) => i === 0 || sign * (pos - positions[i - 1]) >= -2);
+        if (!monotonic) continue;
+        if (!best || total < best.total) best = { coords, first, last, total };
+      }
+      return best ? sliceShape(best.coords, best.first, best.last) : null;
+    };
+
+    const ROUTE_REASON_KEYS = {
+      origin_not_accessible: 'originNotAccessible',
+      destination_not_accessible: 'destinationNotAccessible',
+      no_accessible_route: 'noAccessibleRoute',
+      accessibility_data_unavailable: 'accessibilityUnavailable'
+    };
+
+    const lineColor = (id, feature) =>
+      feature?.properties?.route_color || HEX_LINE_COLORS[id] || '#808080';
+
+    // Straight-line walking distance between two stations, rounded for display.
+    const formatWalkDistance = (meters) => {
+      if (!meters) return '';
+      if (meters >= 1000) return `${(meters / 1000).toFixed(1)} km`;
+      return `${Math.max(10, Math.round(meters / 10) * 10)} m`;
     };
 
     // VS Code Live Server normally serves this file on port 5500 while the
@@ -374,6 +481,22 @@
       );
     };
 
+    // Base map providers, tried in order if tiles fail to load.
+    const BASEMAPS = [
+      {
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+        options: { maxNativeZoom: 16, maxZoom: 18, attribution: 'Tiles &copy; Esri' }
+      },
+      {
+        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        options: { subdomains: 'abcd', maxZoom: 18, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' }
+      },
+      {
+        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        options: { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' }
+      }
+    ];
+
     // Initial station data keeps the UI usable while /api/v1/stations loads.
     // IDs below are GTFS parent-station IDs, not direction-specific platforms.
     const STATIONS_FALLBACK = {
@@ -407,12 +530,6 @@
         { id: 'v7', name: 'Junior\'s Restaurant Brooklyn', category: 'dining', rating: 4.6, reviews: 2900, price: '$$', distance: '8 min walk', image: '🍰', text: 'World-famous iconic Brooklyn cheesecake.' }
       ]
     };
-
-    // Elevator & Escalator Status Demo Data
-    const INITIAL_ELEVATOR_OUTAGES = [
-      { stationId: 'GCT', equipment: 'Elevator EL204 (42nd St Entrance)', status: 'Under Repair', estimatedReturn: 'Today at 4:00 PM' },
-      { stationId: 'PENN', equipment: 'Escalator ES102 (7th Ave Concourse)', status: 'Inspecting', estimatedReturn: 'Today at 2:30 PM' }
-    ];
 
     // --- De-coupled Offline Assistant Engine Logic ---
     const runOfflineAssistantQuery = (query, currentOrigin, currentDest, stationsData, currentRoutes) => {
@@ -1017,6 +1134,40 @@
         validEmailRequired: 'Please enter a valid email address.',
         passwordLength: 'Password must contain at least 8 characters.',
         passwordsMismatch: 'The passwords do not match.',
+        showAllLines: 'Show all lines',
+        showRouteOnly: 'Route only',
+        routeOnlyHint: 'Showing only the selected route. Use Show all lines to see the whole network.',
+        lineHint: 'Click a line to highlight it and see its stops.',
+        lineName: 'Line {line}',
+        lineStations: '{count} stations',
+        closePanel: 'Close',
+        routeDetails: 'Route details',
+        hideDetails: 'Hide details',
+        rideSummary: '{stops} stops, {minutes} min',
+        boardHere: 'Board',
+        alightHere: 'Get off',
+        walkDetail: 'Walk from {from} to {to}: {distance}, about {minutes} min',
+        changeAt: 'Change trains at {station}, about {minutes} min',
+        walkDistanceNote: 'Walking distances are straight-line estimates.',
+        walkWithin: 'Walk within {station}: {distance}, about {minutes} min',
+        serverOffline: 'Cannot reach the transit server. Start it with "node server.js" in the nyc-transit-backend folder, then retry.',
+        serverRetry: 'Retry',
+        loadingOutages: 'Loading outage data...',
+        upcomingOutages: '{count} planned future outages are not shown.',
+        basemapUnavailable: 'Base map tiles could not be loaded. Subway lines and stations are still shown.',
+        accessibleOnly: 'Step-free routes only',
+        accessibleHint: 'Uses MTA station accessibility data and current elevator outages.',
+        originNotAccessible: 'The start station is not step-free accessible.',
+        destinationNotAccessible: 'The destination station is not step-free accessible.',
+        noAccessibleRoute: 'No step-free route was found. Elevators on the way may be out of service.',
+        accessibilityUnavailable: 'Station accessibility data is unavailable right now.',
+        serviceAlerts: 'Service alerts',
+        scheduleNote: 'Using the {day} schedule.',
+        serviceDay_weekday: 'weekday',
+        serviceDay_saturday: 'Saturday',
+        serviceDay_sunday: 'Sunday',
+        lineBranch: 'Branch near {station}',
+        lineBranchGeneric: 'Other stations',
         nameRequired: 'Please enter your full name.',
         resetSent: 'Password reset link sent to {email}',
         welcomeUser: 'Welcome, {email}!',
@@ -1053,6 +1204,40 @@
         validEmailRequired: 'Introduce un correo electrónico válido.',
         passwordLength: 'La contraseña debe tener al menos 8 caracteres.',
         passwordsMismatch: 'Las contraseñas no coinciden.',
+        showAllLines: 'Mostrar todas las líneas',
+        showRouteOnly: 'Solo la ruta',
+        routeOnlyHint: 'Se muestra solo la ruta seleccionada. Usa Mostrar todas las líneas para ver toda la red.',
+        lineHint: 'Haz clic en una línea para resaltarla y ver sus paradas.',
+        lineName: 'Línea {line}',
+        lineStations: '{count} estaciones',
+        closePanel: 'Cerrar',
+        routeDetails: 'Detalles de la ruta',
+        hideDetails: 'Ocultar detalles',
+        rideSummary: '{stops} paradas, {minutes} min',
+        boardHere: 'Subir',
+        alightHere: 'Bajar',
+        walkDetail: 'Camina de {from} a {to}: {distance}, unos {minutes} min',
+        changeAt: 'Cambia de tren en {station}, unos {minutes} min',
+        walkDistanceNote: 'Las distancias a pie son estimaciones en línea recta.',
+        walkWithin: 'Camina dentro de {station}: {distance}, unos {minutes} min',
+        serverOffline: 'No se puede conectar con el servidor. Inicialo con "node server.js" en la carpeta nyc-transit-backend y reintenta.',
+        serverRetry: 'Reintentar',
+        loadingOutages: 'Cargando datos de averías...',
+        upcomingOutages: 'No se muestran {count} averías previstas.',
+        basemapUnavailable: 'No se pudo cargar el mapa base. Las líneas y estaciones siguen visibles.',
+        accessibleOnly: 'Solo rutas sin escalones',
+        accessibleHint: 'Usa los datos de accesibilidad de la MTA y las averías actuales de ascensores.',
+        originNotAccessible: 'La estación de origen no tiene acceso sin escalones.',
+        destinationNotAccessible: 'La estación de destino no tiene acceso sin escalones.',
+        noAccessibleRoute: 'No se encontró una ruta sin escalones. Puede haber ascensores fuera de servicio.',
+        accessibilityUnavailable: 'Los datos de accesibilidad de las estaciones no están disponibles.',
+        serviceAlerts: 'Avisos de servicio',
+        scheduleNote: 'Usando el horario de {day}.',
+        serviceDay_weekday: 'entre semana',
+        serviceDay_saturday: 'sábado',
+        serviceDay_sunday: 'domingo',
+        lineBranch: 'Ramal cerca de {station}',
+        lineBranchGeneric: 'Otras estaciones',
         nameRequired: 'Introduce tu nombre completo.',
         resetSent: 'Enlace de restablecimiento enviado a {email}',
         welcomeUser: '¡Bienvenido, {email}!',
@@ -1089,6 +1274,40 @@
         validEmailRequired: '请输入有效的电子邮箱。',
         passwordLength: '密码至少需要 8 个字符。',
         passwordsMismatch: '两次输入的密码不一致。',
+        showAllLines: '显示所有线路',
+        showRouteOnly: '仅显示所选路线',
+        routeOnlyHint: '当前仅显示所选路线。点击“显示所有线路”可查看整个路网。',
+        lineHint: '点击一条线路可高亮并查看其站点。',
+        lineName: '{line} 线',
+        lineStations: '{count} 个车站',
+        closePanel: '关闭',
+        routeDetails: '路线详情',
+        hideDetails: '收起详情',
+        rideSummary: '{stops} 站，{minutes} 分钟',
+        boardHere: '上车',
+        alightHere: '下车',
+        walkDetail: '从 {from} 步行至 {to}：{distance}，约 {minutes} 分钟',
+        changeAt: '在 {station} 换乘，约 {minutes} 分钟',
+        walkDistanceNote: '步行距离为直线距离估算值。',
+        walkWithin: '在 {station} 内步行：{distance}，约 {minutes} 分钟',
+        serverOffline: '无法连接服务器。请在 nyc-transit-backend 文件夹中运行 "node server.js" 后重试。',
+        serverRetry: '重试',
+        loadingOutages: '正在加载设备故障数据...',
+        upcomingOutages: '另有 {count} 项计划中的未来停用未显示。',
+        basemapUnavailable: '底图加载失败，地铁线路和车站仍会显示。',
+        accessibleOnly: '仅无障碍路线',
+        accessibleHint: '使用 MTA 车站无障碍数据和当前电梯故障信息。',
+        originNotAccessible: '起点站没有无障碍通道。',
+        destinationNotAccessible: '终点站没有无障碍通道。',
+        noAccessibleRoute: '没有找到无障碍路线，沿途电梯可能停用。',
+        accessibilityUnavailable: '暂时无法获取车站无障碍数据。',
+        serviceAlerts: '服务提示',
+        scheduleNote: '当前使用{day}时刻表。',
+        serviceDay_weekday: '工作日',
+        serviceDay_saturday: '周六',
+        serviceDay_sunday: '周日',
+        lineBranch: '{station} 附近的支线',
+        lineBranchGeneric: '其他车站',
         nameRequired: '请输入姓名。',
         resetSent: '密码重置链接已发送至 {email}',
         welcomeUser: '欢迎，{email}！',
@@ -1125,6 +1344,40 @@
         validEmailRequired: '請輸入有效的電子郵件。',
         passwordLength: '密碼至少需要 8 個字元。',
         passwordsMismatch: '兩次輸入的密碼不一致。',
+        showAllLines: '顯示所有路線',
+        showRouteOnly: '僅顯示所選路線',
+        routeOnlyHint: '目前僅顯示所選路線。點擊「顯示所有路線」可查看整個路網。',
+        lineHint: '點擊一條路線可醒目標示並查看其站點。',
+        lineName: '{line} 線',
+        lineStations: '{count} 個車站',
+        closePanel: '關閉',
+        routeDetails: '路線詳情',
+        hideDetails: '收合詳情',
+        rideSummary: '{stops} 站，{minutes} 分鐘',
+        boardHere: '上車',
+        alightHere: '下車',
+        walkDetail: '從 {from} 步行至 {to}：{distance}，約 {minutes} 分鐘',
+        changeAt: '在 {station} 轉乘，約 {minutes} 分鐘',
+        walkDistanceNote: '步行距離為直線距離估算值。',
+        walkWithin: '在 {station} 內步行：{distance}，約 {minutes} 分鐘',
+        serverOffline: '無法連線至伺服器。請在 nyc-transit-backend 資料夾執行 "node server.js" 後重試。',
+        serverRetry: '重試',
+        loadingOutages: '正在載入設備故障資料...',
+        upcomingOutages: '另有 {count} 項計畫中的未來停用未顯示。',
+        basemapUnavailable: '底圖載入失敗，地鐵路線與車站仍會顯示。',
+        accessibleOnly: '僅無障礙路線',
+        accessibleHint: '使用 MTA 車站無障礙資料與目前電梯故障資訊。',
+        originNotAccessible: '起點站沒有無障礙通道。',
+        destinationNotAccessible: '終點站沒有無障礙通道。',
+        noAccessibleRoute: '找不到無障礙路線，沿途電梯可能停用。',
+        accessibilityUnavailable: '暫時無法取得車站無障礙資料。',
+        serviceAlerts: '服務提示',
+        scheduleNote: '目前使用{day}時刻表。',
+        serviceDay_weekday: '平日',
+        serviceDay_saturday: '週六',
+        serviceDay_sunday: '週日',
+        lineBranch: '{station} 附近的支線',
+        lineBranchGeneric: '其他車站',
         nameRequired: '請輸入姓名。',
         resetSent: '密碼重設連結已寄至 {email}',
         welcomeUser: '歡迎，{email}！',
@@ -1161,6 +1414,40 @@
         validEmailRequired: 'Введите корректный адрес электронной почты.',
         passwordLength: 'Пароль должен содержать не менее 8 символов.',
         passwordsMismatch: 'Пароли не совпадают.',
+        showAllLines: 'Показать все линии',
+        showRouteOnly: 'Только маршрут',
+        routeOnlyHint: 'Показан только выбранный маршрут. Нажмите Показать все линии, чтобы увидеть всю сеть.',
+        lineHint: 'Нажмите на линию, чтобы выделить её и увидеть остановки.',
+        lineName: 'Линия {line}',
+        lineStations: 'Станций: {count}',
+        closePanel: 'Закрыть',
+        routeDetails: 'Детали маршрута',
+        hideDetails: 'Скрыть детали',
+        rideSummary: 'Остановок: {stops}, {minutes} мин',
+        boardHere: 'Посадка',
+        alightHere: 'Выход',
+        walkDetail: 'Пешком от {from} до {to}: {distance}, около {minutes} мин',
+        changeAt: 'Пересадка на станции {station}, около {minutes} мин',
+        walkDistanceNote: 'Расстояния пешком указаны по прямой.',
+        walkWithin: 'Пешком внутри станции {station}: {distance}, около {minutes} мин',
+        serverOffline: 'Нет связи с сервером. Запустите "node server.js" в папке nyc-transit-backend и повторите.',
+        serverRetry: 'Повторить',
+        loadingOutages: 'Загрузка данных о неисправностях...',
+        upcomingOutages: 'Запланированных отключений не показано: {count}.',
+        basemapUnavailable: 'Не удалось загрузить подложку карты. Линии и станции отображаются.',
+        accessibleOnly: 'Только маршруты без ступеней',
+        accessibleHint: 'Используются данные MTA о доступности станций и текущие неисправности лифтов.',
+        originNotAccessible: 'Начальная станция не имеет безбарьерного доступа.',
+        destinationNotAccessible: 'Конечная станция не имеет безбарьерного доступа.',
+        noAccessibleRoute: 'Безбарьерный маршрут не найден. Возможно, лифты на пути не работают.',
+        accessibilityUnavailable: 'Данные о доступности станций сейчас недоступны.',
+        serviceAlerts: 'Оповещения о движении',
+        scheduleNote: 'Используется расписание: {day}.',
+        serviceDay_weekday: 'будни',
+        serviceDay_saturday: 'суббота',
+        serviceDay_sunday: 'воскресенье',
+        lineBranch: 'Ветка возле станции {station}',
+        lineBranchGeneric: 'Другие станции',
         nameRequired: 'Введите полное имя.',
         resetSent: 'Ссылка для сброса пароля отправлена на {email}',
         welcomeUser: 'Добро пожаловать, {email}!',
@@ -1197,6 +1484,40 @@
         validEmailRequired: 'Antre yon adrès imèl valab.',
         passwordLength: 'Modpas la dwe gen omwen 8 karaktè.',
         passwordsMismatch: 'Modpas yo pa menm.',
+        showAllLines: 'Montre tout liy yo',
+        showRouteOnly: 'Sèlman wout la',
+        routeOnlyHint: 'Se sèlman wout ou chwazi a ki parèt. Itilize Montre tout liy yo pou wè tout rezo a.',
+        lineHint: 'Klike sou yon liy pou make li epi wè estasyon li yo.',
+        lineName: 'Liy {line}',
+        lineStations: '{count} estasyon',
+        closePanel: 'Fèmen',
+        routeDetails: 'Detay wout la',
+        hideDetails: 'Kache detay yo',
+        rideSummary: '{stops} estasyon, {minutes} min',
+        boardHere: 'Monte',
+        alightHere: 'Desann',
+        walkDetail: 'Mache soti {from} rive {to}: {distance}, anviwon {minutes} min',
+        changeAt: 'Chanje tren nan {station}, anviwon {minutes} min',
+        walkDistanceNote: 'Distans pou mache yo se estimasyon an liy dwat.',
+        walkWithin: 'Mache andedan {station}: {distance}, anviwon {minutes} min',
+        serverOffline: 'Pa ka konekte ak sèvè a. Lanse "node server.js" nan dosye nyc-transit-backend la epi eseye ankò.',
+        serverRetry: 'Eseye ankò',
+        loadingOutages: 'Ap chaje done pann yo...',
+        upcomingOutages: '{count} pann ki planifye pa montre.',
+        basemapUnavailable: 'Pa t kapab chaje kat la. Liy ak estasyon yo toujou parèt.',
+        accessibleOnly: 'Sèlman wout san mach',
+        accessibleHint: 'Itilize done aksesibilite MTA ak pann asansè aktyèl yo.',
+        originNotAccessible: 'Estasyon depa a pa gen aksè san mach.',
+        destinationNotAccessible: 'Estasyon destinasyon an pa gen aksè san mach.',
+        noAccessibleRoute: 'Pa jwenn okenn wout san mach. Gen chans asansè yo pa mache.',
+        accessibilityUnavailable: 'Done aksesibilite estasyon yo pa disponib kounye a.',
+        serviceAlerts: 'Alèt sèvis',
+        scheduleNote: 'Ap itilize orè {day}.',
+        serviceDay_weekday: 'jou semèn',
+        serviceDay_saturday: 'samdi',
+        serviceDay_sunday: 'dimanch',
+        lineBranch: 'Branch toupre {station}',
+        lineBranchGeneric: 'Lòt estasyon',
         nameRequired: 'Antre non konplè ou.',
         resetSent: 'Lyen pou chanje modpas voye nan {email}',
         welcomeUser: 'Byenveni, {email}!',
@@ -1276,6 +1597,11 @@
       // Accessibility Controls
       const [highContrast, setHighContrast] = useState(false);
       const [useAltMap, setUseAltMap] = useState(false);
+      // false: only the selected route is drawn; true: the whole network is drawn.
+      const [showAllLines, setShowAllLines] = useState(false);
+      const [activeLine, setActiveLine] = useState(null);
+      const [expandedRouteId, setExpandedRouteId] = useState(null);
+      const [mapVersion, setMapVersion] = useState(0);
 
       // User Sign-In State
       const [currentUser, setCurrentUser] = useState(() =>
@@ -1353,19 +1679,28 @@
       const mapInstanceRef = useRef(null);
       const polylineRef = useRef(null);
       const markersGroupRef = useRef(null);
+      const networkRef = useRef(null);
+      const lineDetailRef = useRef(null);
+      const fittedRouteRef = useRef({ route: null, map: null });
 
       const [lang, setLang] = useState(getSavedLanguage);
       const [draftLanguage, setDraftLanguage] = useState(getSavedLanguage);
-      const [geoData, setGeoData] = useState({ lines: null, stations: null });
+      const [geoData, setGeoData] = useState({ lines: null, stations: null, lineStops: null });
       const [stationsData, setStationsData] = useState(STATIONS_FALLBACK);
       const [liveTrains, setLiveTrains] = useState([]);
       const [liveTrainCount, setLiveTrainCount] = useState(0);
       const [liveFetchedAt, setLiveFetchedAt] = useState(null);
       const [liveDataError, setLiveDataError] = useState('');
-      const [outages, setOutages] = useState(INITIAL_ELEVATOR_OUTAGES);
+      const [outages, setOutages] = useState([]);
+      const [outagesLoaded, setOutagesLoaded] = useState(false);
+      const [upcomingOutageCount, setUpcomingOutageCount] = useState(0);
+      const [serverOffline, setServerOffline] = useState(false);
+      const [basemapFailed, setBasemapFailed] = useState(false);
       const [outageError, setOutageError] = useState('');
       const [routeLoading, setRouteLoading] = useState(false);
       const [routeError, setRouteError] = useState('');
+      const [accessibleOnly, setAccessibleOnly] = useState(false);
+      const [serviceDay, setServiceDay] = useState(null);
       const t = (key, values) =>
         interpolate(
           FEATURE_TRANSLATIONS[lang]?.[key] ??
@@ -1422,12 +1757,14 @@
             const nextStations = Object.fromEntries(
               data.stations.map((station) => [station.id, station])
             );
+            setServerOffline(false);
             setStationsData(nextStations);
             setOrigin((current) => nextStations[current] ? current : data.stations[0].id);
             setDestination((current) => nextStations[current] ? current : data.stations[1].id);
           })
           .catch((error) => {
             console.error('Unable to load stations from Express:', error);
+            if (!disposed && error instanceof TypeError) setServerOffline(true);
           });
         return () => { disposed = true; };
       }, []);
@@ -1454,12 +1791,17 @@
             setLiveTrainCount(trainsResult.value.trainCount || 0);
             setLiveFetchedAt(trainsResult.value.timestamp || trainsResult.value.cachedAt || null);
             setLiveDataError('');
+            setServerOffline(false);
           } else {
             setLiveDataError('liveUnavailable');
+            // fetch() rejects with a TypeError only when the server is unreachable.
+            if (trainsResult.reason instanceof TypeError) setServerOffline(true);
           }
 
           if (outagesResult.status === 'fulfilled') {
             setOutages(outagesResult.value.outages || []);
+            setUpcomingOutageCount(outagesResult.value.upcomingCount || 0);
+            setOutagesLoaded(true);
             setOutageError('');
           } else {
             setOutageError('outagesUnavailable');
@@ -1481,54 +1823,255 @@
             mapInstanceRef.current = null;
             markersGroupRef.current = null;
             polylineRef.current = null;
+            networkRef.current = null;
+            lineDetailRef.current = null;
+            fittedRouteRef.current = { route: null, map: null };
           }
           return;
         }
 
         if (!mapInstanceRef.current) {
           const map = L.map(mapContainerRef.current, { center: [40.730, -73.980], zoom: 11, zoomControl: true });
-          L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }).addTo(map);
+          let basemapIndex = -1;
+          let basemapLayer = null;
+          let tilesLoaded = 0;
+          let tileErrors = 0;
+          const useBasemap = (index) => {
+            if (basemapLayer) map.removeLayer(basemapLayer);
+            basemapIndex = index;
+            tilesLoaded = 0;
+            tileErrors = 0;
+            const spec = BASEMAPS[index];
+            basemapLayer = L.tileLayer(spec.url, spec.options).addTo(map);
+            basemapLayer.on('tileload', () => {
+              tilesLoaded += 1;
+              setBasemapFailed(false);
+            });
+            basemapLayer.on('tileerror', () => {
+              tileErrors += 1;
+              // Nothing has loaded from this provider: move on to the next one.
+              if (tilesLoaded === 0 && tileErrors >= 4 && basemapIndex === index) {
+                if (index + 1 < BASEMAPS.length) useBasemap(index + 1);
+                else setBasemapFailed(true);
+              }
+            });
+          };
+          useBasemap(0);
           mapInstanceRef.current = map;
           markersGroupRef.current = L.layerGroup().addTo(map);
+          map.on('click', () => setActiveLine(null));
+          setMapVersion((version) => version + 1);
         }
 
         const loadGeoJSON = async () => {
           const response = await fetch(apiUrl('/api/v1/routes/shapes'));
           if (!response.ok) throw new Error(`Map API returned ${response.status}`);
           const data = await response.json();
-          setGeoData({ lines: data.lines, stations: data.stations });
+          setGeoData({ lines: data.lines, stations: data.stations, lineStops: data.lineStops || null });
         };
         if (!geoData.lines) loadGeoJSON();
       }, [currentView, useAltMap]);
 
-      // 渲染 GeoJSON
+      // The whole network is shown when the user asks for it, or when there is
+      // no route to focus on.
+      const showNetwork = showAllLines || routeResults.length === 0;
+      const effectiveActiveLine = showNetwork ? activeLine : null;
+
+      // Stations of the clicked line, in travel order. Uses the order built from
+      // the GTFS timetable (lineStops) when available: a main trunk plus
+      // branches. Otherwise falls back to projecting stations onto the shape.
+      const activeLineInfo = useMemo(() => {
+        if (!activeLine || !geoData.lines || !geoData.stations) return null;
+        const shapes = geoData.lines.features.filter(
+          (feature) => displayRouteId(feature.properties.route_id) === activeLine
+        );
+        if (!shapes.length) return null;
+        const primary = shapes.reduce((best, feature) =>
+          feature.geometry.coordinates.length > best.geometry.coordinates.length ? feature : best
+        );
+
+        const stationById = new Map(geoData.stations.features.map((f) => [f.properties.stop_id, f]));
+        const toEntry = (id) => {
+          const feature = stationById.get(id);
+          if (!feature) return null;
+          const ids = [...new Set((feature.properties.lines || []).map(displayRouteId))];
+          const [lon, lat] = feature.geometry.coordinates;
+          return {
+            id,
+            name: feature.properties.stop_name,
+            lat,
+            lon,
+            otherLines: ids.filter((other) => other !== activeLine)
+          };
+        };
+        const nameOf = (id) => stationById.get(id)?.properties.stop_name || '';
+
+        let sections;
+        const plan = geoData.lineStops?.[activeLine];
+        if (plan) {
+          sections = [{ branch: null, stations: plan.main.map(toEntry).filter(Boolean) }];
+          plan.branches.forEach((branch) => {
+            const stations = branch.stations.map(toEntry).filter(Boolean);
+            if (stations.length) {
+              sections.push({ branch: nameOf(branch.from || branch.to || branch.stations[0]), stations });
+            }
+          });
+        } else {
+          const coords = primary.geometry.coordinates;
+          const onLine = [];
+          const branch = [];
+          geoData.stations.features.forEach((feature) => {
+            const ids = [...new Set((feature.properties.lines || []).map(displayRouteId))];
+            if (!ids.includes(activeLine)) return;
+            const [lon, lat] = feature.geometry.coordinates;
+            const { dist, pos } = projectOnShape(coords, lon, lat);
+            const entry = { ...toEntry(feature.properties.stop_id), pos };
+            (dist <= 400 ? onLine : branch).push(entry);
+          });
+          onLine.sort((a, b) => a.pos - b.pos);
+          branch.sort((a, b) => a.pos - b.pos);
+          sections = [{ branch: null, stations: onLine }];
+          if (branch.length) sections.push({ branch: '', stations: branch });
+        }
+
+        const stations = sections.flatMap((section) => section.stations);
+        if (!stations.length) return null;
+        return {
+          id: activeLine,
+          color: lineColor(activeLine, primary),
+          sections,
+          stations,
+          bounds: L.latLngBounds(stations.map((station) => [station.lat, station.lon]))
+        };
+      }, [activeLine, geoData]);
+
+      // Build the network layers (all lines + all stations) once per map/data.
       useEffect(() => {
-        if (!mapInstanceRef.current || !geoData.lines || !markersGroupRef.current) return;
-        markersGroupRef.current.clearLayers();
+        const map = mapInstanceRef.current;
+        if (!map || !geoData.lines || !geoData.stations) return;
+        if (networkRef.current) map.removeLayer(networkRef.current.group);
 
-        L.geoJSON(geoData.lines, {
-          style: (feature) => ({
-            color: feature.properties.route_color || HEX_LINE_COLORS[displayRouteId(feature.properties.route_id)] || '#808080',
+        const group = L.layerGroup();
+        const lineLayers = new Map();
+        geoData.lines.features.forEach((feature) => {
+          const id = displayRouteId(feature.properties.route_id);
+          const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+          const visible = L.polyline(latlngs, {
+            color: lineColor(id, feature),
             weight: 4,
-            opacity: 0.8
-          })
-        }).addTo(mapInstanceRef.current);
+            opacity: 0.8,
+            interactive: false
+          }).addTo(group);
+          // Wide invisible stroke on top makes thin lines easy to click.
+          const hit = L.polyline(latlngs, { weight: 14, opacity: 0, bubblingMouseEvents: false }).addTo(group);
+          hit.bindTooltip(escapeHtml(t('lineName', { line: id })), { sticky: true });
+          hit.on('click', () => setActiveLine(id));
+          if (!lineLayers.has(id)) lineLayers.set(id, []);
+          lineLayers.get(id).push(visible);
+        });
 
-        L.geoJSON(geoData.stations, {
-          pointToLayer: (feature, latlng) => {
-            const lineStr = feature.properties.daytime_routes || '';
-            let parsedLines = lineStr.split(/[\s,]+/).map(l => l === 'SIR' ? 'S' : l.split('')).flat().filter(c => HEX_LINE_COLORS[c]);
-            parsedLines = [...new Set(parsedLines)];
-            let fillColor = parsedLines.length === 1 ? HEX_LINE_COLORS[parsedLines[0]] : '#ffffff';
-            return L.circleMarker(latlng, { radius: 5, fillColor: fillColor, color: '#0f172a', weight: 2, fillOpacity: 1 });
-          },
-          onEachFeature: (feature, layer) => {
-            const name = feature.properties.stop_name || 'Unknown';
-            const lines = (feature.properties.daytime_routes || '').split(' ').join(', ');
-            layer.bindPopup(`<div class="text-xs"><b>${name}</b><br/>${lines}</div>`);
+        const stationLayers = new Map();
+        geoData.stations.features.forEach((feature) => {
+          const props = feature.properties;
+          const ids = [...new Set((props.lines || []).map(displayRouteId))];
+          const [lon, lat] = feature.geometry.coordinates;
+          const marker = L.circleMarker([lat, lon], {
+            radius: 5,
+            fillColor: ids.length === 1 ? lineColor(ids[0]) : '#ffffff',
+            color: '#0f172a',
+            weight: 2,
+            fillOpacity: 1,
+            bubblingMouseEvents: false
+          }).addTo(group);
+          marker.bindPopup(`<div class="text-xs"><b>${escapeHtml(props.stop_name || 'Unknown')}</b><br/>${escapeHtml(ids.join(', '))}</div>`);
+          stationLayers.set(props.stop_id, { layer: marker, lines: ids });
+        });
+
+        networkRef.current = { group, lineLayers, stationLayers };
+      }, [geoData, mapVersion, lang]);
+
+      // Show/hide the network and fade everything except the clicked line.
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        const network = networkRef.current;
+        if (!map || !network) return;
+
+        if (showNetwork) {
+          if (!map.hasLayer(network.group)) {
+            network.group.addTo(map);
+            // Keep the selected route above the freshly re-added network.
+            if (polylineRef.current) {
+              polylineRef.current.eachLayer((layer) => layer.bringToFront && layer.bringToFront());
+            }
           }
-        }).addTo(markersGroupRef.current);
-      }, [geoData]);
+        } else if (map.hasLayer(network.group)) {
+          map.removeLayer(network.group);
+        }
+
+        network.lineLayers.forEach((layers, id) => {
+          const highlighted = effectiveActiveLine === id;
+          const dimmed = effectiveActiveLine && !highlighted;
+          layers.forEach((layer) => {
+            layer.setStyle({
+              opacity: dimmed ? 0.1 : highlighted ? 1 : 0.8,
+              weight: highlighted ? 7 : dimmed ? 3 : 4
+            });
+            if (highlighted) layer.bringToFront();
+          });
+        });
+        network.stationLayers.forEach(({ layer, lines }) => {
+          const onLine = !effectiveActiveLine || lines.includes(effectiveActiveLine);
+          layer.setStyle({ opacity: onLine ? 1 : 0.12, fillOpacity: onLine ? 1 : 0.12 });
+          layer.setRadius(onLine ? 5 : 3);
+        });
+      }, [showNetwork, effectiveActiveLine, geoData, mapVersion, lang]);
+
+      // Stop markers for the clicked line.
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (lineDetailRef.current) {
+          if (map) map.removeLayer(lineDetailRef.current.group);
+          lineDetailRef.current = null;
+        }
+        if (!map || !effectiveActiveLine || !activeLineInfo) return;
+
+        const group = L.layerGroup();
+        const markers = new Map();
+        const trunk = activeLineInfo.sections[0].stations;
+        const terminals = new Set([trunk[0]?.id, trunk[trunk.length - 1]?.id]);
+        activeLineInfo.stations.forEach((station) => {
+          const isTerminal = terminals.has(station.id);
+          const marker = L.circleMarker([station.lat, station.lon], {
+            radius: isTerminal ? 8 : 6,
+            fillColor: '#ffffff',
+            color: activeLineInfo.color,
+            weight: 3,
+            fillOpacity: 1,
+            bubblingMouseEvents: false
+          }).addTo(group);
+          const name = escapeHtml(station.name);
+          marker.bindTooltip(name, {
+            permanent: isTerminal,
+            direction: 'top',
+            offset: [0, -8],
+            className: isTerminal ? 'route-stop-label' : ''
+          });
+          const transfers = station.otherLines.length ? `<br/>${escapeHtml(station.otherLines.join(', '))}` : '';
+          marker.bindPopup(`<div class="text-xs"><b>${name}</b><br/>${escapeHtml(activeLineInfo.id)}${transfers ? ' + ' + transfers.replace('<br/>', '') : ''}</div>`);
+          markers.set(station.id, marker);
+        });
+        group.addTo(map);
+        lineDetailRef.current = { group, markers };
+        map.invalidateSize();
+        map.fitBounds(activeLineInfo.bounds, { padding: [40, 40], maxZoom: 14 });
+      }, [effectiveActiveLine, activeLineInfo, mapVersion]);
+
+      const focusLineStation = (station) => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        map.flyTo([station.lat, station.lon], Math.max(map.getZoom(), 14), { duration: 0.6 });
+        lineDetailRef.current?.markers.get(station.id)?.openPopup();
+      };
 
 
       // Server-side all-station route planning. The frontend sends parent
@@ -1545,7 +2088,7 @@
         setRouteLoading(true);
         setRouteError('');
 
-        fetch(apiUrl(`/api/v1/routes/plan?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&maxOptions=3`), {
+        fetch(apiUrl(`/api/v1/routes/plan?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&maxOptions=3${accessibleOnly ? '&accessible=true' : ''}`), {
           signal: controller.signal
         })
           .then((response) => {
@@ -1554,9 +2097,10 @@
           })
           .then((data) => {
             setRouteResults(data.routes || []);
+            setServiceDay(data.serviceDay || null);
             setSelectedRouteOption(0);
             if (!data.routes?.length) {
-              setRouteError('noRouteFound');
+              setRouteError(ROUTE_REASON_KEYS[data.reason] || 'noRouteFound');
             }
           })
           .catch((error) => {
@@ -1571,28 +2115,135 @@
           });
 
         return () => controller.abort();
-      }, [origin, destination, stationsData]);
+      }, [origin, destination, stationsData, accessibleOnly]);
 
       useEffect(() => {
-        if (!mapInstanceRef.current) return;
+        const map = mapInstanceRef.current;
+        if (!map) return;
         if (polylineRef.current) {
-          mapInstanceRef.current.removeLayer(polylineRef.current);
+          map.removeLayer(polylineRef.current);
           polylineRef.current = null;
         }
 
         const selectedRoute = routeResults.find((route) => route.id === selectedRouteOption);
         if (!selectedRoute?.polyline?.length) return;
 
-        const activeLine = selectedRoute.lines?.[0] || '1';
-        polylineRef.current = L.polyline(selectedRoute.polyline, {
-          color: HEX_LINE_COLORS[activeLine] || '#3b82f6',
-          weight: 5,
-          opacity: 0.9,
-          dashArray: '8, 6'
-        }).addTo(mapInstanceRef.current);
-        mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [40, 40] });
-      }, [routeResults, selectedRouteOption, geoData, currentView, useAltMap]);
+        const group = L.layerGroup();
+        const bounds = [];
+        const segments = selectedRoute.segments || [];
+        const hasStopData = segments.some((segment) => segment.stops?.length > 1);
 
+        if (!hasStopData) {
+          // Older API responses: a single line through all stations.
+          const activeLine = selectedRoute.lines?.[0] || '1';
+          L.polyline(selectedRoute.polyline, {
+            color: HEX_LINE_COLORS[activeLine] || '#3b82f6',
+            weight: 5,
+            opacity: 0.9,
+            dashArray: '8, 6'
+          }).addTo(group);
+          bounds.push(...selectedRoute.polyline);
+        } else {
+          // Walking / transfer connectors between different stations.
+          segments.forEach((segment) => {
+            if (segment.kind === 'subway' || segment.path?.length < 2) return;
+            if (segment.fromName === segment.toName) return;
+            const points = segment.path.map((p) => [p.lat, p.lon]);
+            L.polyline(points, { color: '#94a3b8', weight: 4, opacity: 0.9, dashArray: '4, 8' }).addTo(group);
+            bounds.push(...points);
+          });
+
+          // Subway legs drawn in each line's colour.
+          const subwaySegments = segments.filter((segment) => segment.kind === 'subway' && segment.stops?.length > 1);
+          subwaySegments.forEach((segment) => {
+            const stopPoints = segment.stops.map((stop) => [stop.lat, stop.lon]);
+            // Follow the real track when a matching line shape is loaded.
+            const points = followTrack(segment.stops, segment.line, geoData.lines?.features) || stopPoints;
+            const color = HEX_LINE_COLORS[segment.line] || '#3b82f6';
+            L.polyline(points, { color: '#020617', weight: 10, opacity: 0.85 }).addTo(group);
+            L.polyline(points, { color, weight: 6, opacity: 1 }).addTo(group);
+            bounds.push(...points);
+          });
+
+          // A marker on every stop; labels always shown for the start,
+          // destination and transfer stations, on hover for the rest.
+          const labelled = new Set();
+          subwaySegments.forEach((segment, segmentIndex) => {
+            const color = HEX_LINE_COLORS[segment.line] || '#3b82f6';
+            const lastIndex = segment.stops.length - 1;
+            segment.stops.forEach((stop, stopIndex) => {
+              const isEndpoint = stopIndex === 0 || stopIndex === lastIndex;
+              const isRouteStart = segmentIndex === 0 && stopIndex === 0;
+              const isRouteEnd = segmentIndex === subwaySegments.length - 1 && stopIndex === lastIndex;
+              const marker = L.circleMarker([stop.lat, stop.lon], {
+                radius: isEndpoint ? 8 : 5,
+                fillColor: isEndpoint ? '#ffffff' : '#e2e8f0',
+                color: isRouteStart ? '#22c55e' : isRouteEnd ? '#ef4444' : color,
+                weight: isEndpoint ? 4 : 3,
+                fillOpacity: 1
+              });
+              const label = escapeHtml(stop.name);
+              const showLabel = isEndpoint && !labelled.has(stop.id);
+              marker.bindTooltip(label, {
+                permanent: showLabel,
+                direction: 'top',
+                offset: [0, -8],
+                className: showLabel ? 'route-stop-label route-layer-label' : ''
+              });
+              marker.bindPopup(`<div class="text-xs"><b>${label}</b><br/>${escapeHtml(segment.line)}</div>`);
+              if (isEndpoint) labelled.add(stop.id);
+              marker.addTo(group);
+            });
+          });
+        }
+
+        group.addTo(map);
+        polylineRef.current = group;
+        // The map container can still be sizing itself when the route arrives;
+        // recompute its size first, otherwise fitBounds zooms in to the maximum.
+        // Only re-fit when the route (or map) changed, not when toggling layers.
+        let fitTimer = null;
+        if (
+          fittedRouteRef.current.route !== selectedRoute ||
+          fittedRouteRef.current.map !== map
+        ) {
+          fittedRouteRef.current = { route: selectedRoute, map };
+          const fitRoute = () => {
+            if (mapInstanceRef.current !== map || !bounds.length) return;
+            map.invalidateSize();
+            map.fitBounds(L.latLngBounds(bounds), { padding: [50, 50], maxZoom: 15 });
+          };
+          fitRoute();
+          fitTimer = setTimeout(fitRoute, 300);
+        }
+        return () => {
+          if (fitTimer) clearTimeout(fitTimer);
+        };
+      }, [routeResults, selectedRouteOption, currentView, useAltMap, mapVersion, geoData]);
+
+
+      // While a line is highlighted, fade the searched route as well.
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        const dim = Boolean(effectiveActiveLine);
+        map.getContainer().classList.toggle('line-focus', dim);
+        if (!polylineRef.current) return;
+        polylineRef.current.eachLayer((layer) => {
+          if (!layer.setStyle) return;
+          if (!layer.options.baseStyle) {
+            layer.options.baseStyle = {
+              opacity: layer.options.opacity,
+              fillOpacity: layer.options.fillOpacity
+            };
+          }
+          const base = layer.options.baseStyle;
+          layer.setStyle({
+            opacity: dim ? base.opacity * 0.2 : base.opacity,
+            fillOpacity: dim ? (base.fillOpacity ?? 1) * 0.2 : base.fillOpacity
+          });
+        });
+      }, [effectiveActiveLine, routeResults, selectedRouteOption, mapVersion, showNetwork]);
 
       // Sign-In Handlers
       const handleAuthSubmit = (e) => {
@@ -1791,6 +2442,82 @@
           station: stationsData[destination]?.name || route.destinationId
         }));
         return steps;
+      };
+
+      // Expandable itinerary: every stop on each ride plus walking transfers.
+      const renderRouteDetails = (route) => {
+        const segments = route.segments || [];
+        const lastIndex = segments.length - 1;
+        let rideCounter = 0;
+        let hasDistance = false;
+
+        const rows = segments.map((segment, index) => {
+          const minutes = Math.max(1, Math.round(segment.durationSeconds / 60));
+
+          if (segment.kind === 'subway') {
+            const stops = segment.stops?.length
+              ? segment.stops
+              : (segment.stopIds || []).map((id) => ({ id, name: id }));
+            const color = HEX_LINE_COLORS[segment.line] || '#3b82f6';
+            const isExpress = Boolean(route.isExpress?.[rideCounter]);
+            rideCounter += 1;
+            return (
+              <div key={`ride-${index}`}>
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <LineBadge line={segment.line} isExpress={isExpress} size="w-5 h-5 text-[10px]" />
+                  <span>{t('rideSummary', { stops: Math.max(1, stops.length - 1), minutes })}</span>
+                </div>
+                <ol className="mt-2 ml-2.5 pl-4 border-l-4 space-y-1.5 text-[11px]" style={{ borderColor: color }}>
+                  {stops.map((stop, i) => {
+                    const isEnd = i === 0 || i === stops.length - 1;
+                    return (
+                      <li key={`${stop.id}-${i}`} className={`relative ${isEnd ? 'font-bold text-white' : 'text-slate-300'}`}>
+                        <span className="absolute -left-[23px] top-1 w-2.5 h-2.5 rounded-full bg-slate-950 border-2" style={{ borderColor: color }} />
+                        {stop.name}
+                        {i === 0 && <span className="ml-1.5 text-[10px] font-semibold text-emerald-400">{t('boardHere')}</span>}
+                        {i === stops.length - 1 && <span className="ml-1.5 text-[10px] font-semibold text-red-400">{t('alightHere')}</span>}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
+            );
+          }
+
+          const sameStation = segment.fromName === segment.toName;
+          const distance = formatWalkDistance(segment.distanceMeters);
+          // Walking to/from the platform inside one station is not worth a row.
+          // A same-station change is only shown between two rides; platform
+          // access next to a transfer walk is already covered by that walk.
+          if (
+            sameStation && !distance &&
+            !(segments[index - 1]?.kind === 'subway' && segments[index + 1]?.kind === 'subway')
+          ) return null;
+          if (distance) hasDistance = true;
+          let text;
+          if (sameStation && distance) {
+            text = t('walkWithin', { station: segment.fromName, distance, minutes });
+          } else if (sameStation) {
+            text = t('changeAt', { station: segment.fromName, minutes });
+          } else if (distance) {
+            text = t('walkDetail', { from: segment.fromName, to: segment.toName, distance, minutes });
+          } else {
+            text = t('transferWalk', { from: segment.fromName, to: segment.toName, minutes });
+          }
+          return (
+            <div key={`walk-${index}`} className="flex items-start gap-2 px-2.5 py-2 rounded-lg border border-dashed border-slate-600 bg-slate-900/60 text-[11px] text-slate-200">
+              <Icon name="footprints" className="w-4 h-4 text-slate-400 mt-0.5" />
+              <span>{text}</span>
+            </div>
+          );
+        });
+
+        return (
+          <div className="space-y-3 mb-3 p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+            {rows}
+            {hasDistance && <p className="text-[10px] text-slate-500">{t('walkDistanceNote')}</p>}
+          </div>
+        );
       };
 
       return (
@@ -2097,6 +2824,20 @@
 
           <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
+            {serverOffline && (
+              <div role="alert" className="p-4 rounded-2xl border border-red-800 bg-red-950/40 text-xs text-red-200 flex flex-wrap items-center gap-3">
+                <Icon name="wifi-off" className="w-4 h-4 text-red-400" />
+                <span className="flex-1 min-w-[200px]">{t('serverOffline')}</span>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold"
+                >
+                  {t('serverRetry')}
+                </button>
+              </div>
+            )}
+
             {/* VIEW 1: PROFILE & SAVED FAVORITES */}
             {currentView === 'profile' && (
               <div className="max-w-4xl mx-auto space-y-6">
@@ -2390,6 +3131,19 @@
                         placeholder={t('searchDestination')}
                         t={t}
                       />
+                      <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={accessibleOnly}
+                          onChange={(e) => setAccessibleOnly(e.target.checked)}
+                          className="mt-0.5"
+                        />
+                        <span>
+                          <span className="font-semibold">♿ {t('accessibleOnly')}</span>
+                          <br />
+                          <span className="text-[10px] text-slate-500">{t('accessibleHint')}</span>
+                        </span>
+                      </label>
                     </div>
                   </div>
 
@@ -2436,6 +3190,11 @@
                         {t(routeError)}
                       </div>
                     )}
+                    {routeResults.length > 0 && serviceDay && (
+                      <p className="text-[11px] text-slate-500">
+                        {t('scheduleNote', { day: t('serviceDay_' + serviceDay) })}
+                      </p>
+                    )}
                     {routeResults.map((opt) => (
                       <div
                         key={opt.id}
@@ -2476,6 +3235,38 @@
                             </p>
                           ))}
                         </div>
+
+                        {opt.alerts?.length > 0 && (
+                          <div className="mb-3 p-2.5 rounded-lg border border-amber-800/70 bg-amber-950/30 text-[11px] text-amber-200 space-y-1">
+                            <p className="font-bold flex items-center gap-1">
+                              <Icon name="triangle-alert" className="w-3.5 h-3.5" />
+                              {t('serviceAlerts')}
+                            </p>
+                            {opt.alerts.map((alert) => (
+                              <p key={alert.line}>
+                                <span className="font-bold">{alert.line}:</span> {alert.items[0].headline}
+                                {alert.items.length > 1 ? ` (+${alert.items.length - 1})` : ''}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Route details (expandable) */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedRouteId(expandedRouteId === opt.id ? null : opt.id);
+                          }}
+                          aria-expanded={expandedRouteId === opt.id}
+                          className="w-full mb-3 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center justify-center gap-1.5"
+                        >
+                          <Icon name={expandedRouteId === opt.id ? 'chevron-up' : 'chevron-down'} className="w-3.5 h-3.5" />
+                          {expandedRouteId === opt.id ? t('hideDetails') : t('routeDetails')}
+                        </button>
+                        {expandedRouteId === opt.id && (
+                          <div onClick={(e) => e.stopPropagation()}>{renderRouteDetails(opt)}</div>
+                        )}
 
                         {/* Actions */}
                         <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
@@ -2544,17 +3335,91 @@
                         {t('interactiveMap')}
                       </h2>
 
-                      <button
-                        onClick={() => setUseAltMap(!useAltMap)}
-                        className="text-xs text-slate-400 hover:text-white underline flex items-center gap-1"
-                      >
-                        <Icon name="list" className="w-3.5 h-3.5" />
-                        {useAltMap ? t('mapView') : t('stationListView')}
-                      </button>
+                      <div className="flex items-center gap-3">
+                        {!useAltMap && routeResults.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAllLines(!showAllLines);
+                              setActiveLine(null);
+                            }}
+                            aria-pressed={showAllLines}
+                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1.5 transition ${
+                              showAllLines
+                                ? 'bg-blue-600 border-blue-400 text-white'
+                                : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <Icon name="layers" className="w-3.5 h-3.5" />
+                            {showAllLines ? t('showRouteOnly') : t('showAllLines')}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setUseAltMap(!useAltMap)}
+                          className="text-xs text-slate-400 hover:text-white underline flex items-center gap-1"
+                        >
+                          <Icon name="list" className="w-3.5 h-3.5" />
+                          {useAltMap ? t('mapView') : t('stationListView')}
+                        </button>
+                      </div>
                     </div>
 
                     {!useAltMap ? (
-                      <div ref={mapContainerRef} className="h-[440px] w-full rounded-xl border border-slate-800 shadow-inner"></div>
+                      <div className="space-y-2">
+                        <div className="relative">
+                          <div ref={mapContainerRef} className="h-[440px] w-full rounded-xl border border-slate-800 shadow-inner"></div>
+                          {effectiveActiveLine && activeLineInfo && (
+                            <div className="absolute top-3 right-3 z-[1000] w-60 max-h-[400px] flex flex-col rounded-xl border border-slate-700 bg-slate-950/95 shadow-2xl text-xs">
+                              <div className="flex items-center gap-2 p-3 border-b border-slate-800">
+                                <LineBadge line={activeLineInfo.id} size="w-6 h-6 text-xs" />
+                                <div className="flex-1">
+                                  <p className="font-bold text-white">{t('lineName', { line: activeLineInfo.id })}</p>
+                                  <p className="text-[10px] text-slate-400">{t('lineStations', { count: activeLineInfo.stations.length })}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveLine(null)}
+                                  aria-label={t('closePanel')}
+                                  className="p-1 rounded hover:bg-slate-800 text-slate-400"
+                                >
+                                  <Icon name="x" className="w-4 h-4" />
+                                </button>
+                              </div>
+                              <div className="overflow-y-auto p-2 space-y-2">
+                                {activeLineInfo.sections.map((section, sectionIndex) => (
+                                  <div key={sectionIndex}>
+                                    {section.branch !== null && (
+                                      <p className="px-2 pb-1 text-[10px] uppercase tracking-wider text-slate-500">
+                                        {section.branch ? t('lineBranch', { station: section.branch }) : t('lineBranchGeneric')}
+                                      </p>
+                                    )}
+                                    <ol className="space-y-0.5">
+                                      {section.stations.map((station) => (
+                                        <li key={station.id}>
+                                          <button
+                                            type="button"
+                                            onClick={() => focusLineStation(station)}
+                                            className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-slate-800 flex items-center gap-2"
+                                          >
+                                            <span className="w-2.5 h-2.5 rounded-full border-2 flex-shrink-0" style={{ borderColor: activeLineInfo.color }} />
+                                            <span className="flex-1 text-slate-200">{station.name}</span>
+                                            <span className="flex gap-0.5">
+                                              {station.otherLines.slice(0, 5).map((l) => (
+                                                <LineBadge key={l} line={l} size="w-4 h-4 text-[9px]" />
+                                              ))}
+                                            </span>
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-500">{basemapFailed ? t('basemapUnavailable') : showNetwork ? t('lineHint') : t('routeOnlyHint')}</p>
+                      </div>
                     ) : (
                       <div className="p-4 rounded-xl border border-slate-800 bg-slate-900 space-y-2 text-xs">
                         <p className="font-bold text-slate-300">{t('stationListView')}:</p>
@@ -2627,16 +3492,21 @@
                         {outageError && (
                           <p className="text-[11px] text-amber-400">{t(outageError)}</p>
                         )}
-                        {!outageError && outages.length === 0 && (
+                        {!outageError && !outagesLoaded && (
+                          <p className="text-[11px] text-slate-500">{t('loadingOutages')}</p>
+                        )}
+                        {!outageError && outagesLoaded && outages.length === 0 && (
                           <p className="text-[11px] text-emerald-400">{t('noOutages')}</p>
                         )}
-                        {outages.slice(0, 4).map((out, i) => (
+                        <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                        {outages.map((out, i) => (
                           <div key={`${out.equipmentId || out.equipment || 'outage'}-${i}`} className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
                             <p className="font-bold text-slate-200">
-                              {out.equipment || `${out.equipmentType || 'Equipment'} ${out.equipmentId || ''}`}
+                              {out.stationName || out.station || '—'}
+                              {out.lines && <span className="ml-1.5 font-normal text-slate-400">({out.lines})</span>}
                             </p>
                             <p className="text-[10px] text-slate-400">
-                              {out.stationName || out.station || 'Station unavailable'}
+                              {out.equipmentType || 'Equipment'} {out.equipmentId || ''}{out.serving ? ` · ${out.serving}` : ''}
                             </p>
                             <div className="flex justify-between text-[11px]">
                               <span className="text-red-400 font-semibold">{out.status || out.reason || 'Unavailable'}</span>
@@ -2644,6 +3514,10 @@
                             </div>
                           </div>
                         ))}
+                        </div>
+                        {upcomingOutageCount > 0 && (
+                          <p className="text-[10px] text-slate-500">{t('upcomingOutages', { count: upcomingOutageCount })}</p>
+                        )}
                       </div>
                     </div>
 

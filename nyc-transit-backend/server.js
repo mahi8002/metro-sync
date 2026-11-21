@@ -1,10 +1,14 @@
 import 'dotenv/config';
+import compression from 'compression';
 import cors from 'cors';
+import frontendLocator from './frontendFile.cjs';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchAllSubwayLines } from './services/mtaMultiFeedService.js';
+import { createCache } from './services/cacheService.js';
+import { fetchAllSubwayLines, resolveStop } from './services/mtaMultiFeedService.js';
 import { fetchAccessibilityOutages } from './services/mtaExtrasService.js';
+import { fetchServiceAlerts } from './services/mtaAlertsService.js';
 import { initStaticStops } from './services/staticMapService.js';
 import { getMapData } from './services/mapService.js';
 import {
@@ -13,17 +17,27 @@ import {
   getStations,
   initRoutePlanner,
   planRoutes,
+  serviceDayFor,
 } from './services/routePlanningService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = path.resolve(__dirname, '..');
-const FRONTEND_FILE = path.join(PROJECT_DIR, 'Metro Sync_v2.1.1.html');
+const { findFrontendFile } = frontendLocator;
 const PORT = Number(process.env.PORT) || 5000;
 
 const app = express();
-const cache = new Map();
+const cache = createCache();
+
+const TRAINS_TTL_MS = 15_000;
+const OUTAGES_TTL_MS = 60_000;
+const TRAINS_MAX_STALE_MS = 5 * 60_000;
+const OUTAGES_MAX_STALE_MS = 30 * 60_000;
+const ALERTS_TTL_MS = 60_000;
+const ALERTS_MAX_STALE_MS = 10 * 60_000;
+const SERVICE_DAYS = ['weekday', 'saturday', 'sunday'];
 
 app.disable('x-powered-by');
+app.use(compression());
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN
@@ -32,23 +46,6 @@ app.use(
   })
 );
 app.use(express.json({ limit: '100kb' }));
-
-const getCached = async (key, ttlMs, loader) => {
-  const existing = cache.get(key);
-  const now = Date.now();
-  if (existing && existing.expiresAt > now) {
-    return { value: existing.value, cached: true, cachedAt: existing.cachedAt };
-  }
-
-  const value = await loader();
-  const cachedAt = new Date().toISOString();
-  cache.set(key, {
-    value,
-    cachedAt,
-    expiresAt: now + ttlMs,
-  });
-  return { value, cached: false, cachedAt };
-};
 
 const normalizeLiveTrips = (trips) => {
   const now = Math.floor(Date.now() / 1000);
@@ -70,11 +67,31 @@ const normalizeLiveTrips = (trips) => {
     normalized.push({
       ...trip,
       stopTimeUpdates: futureStops.slice(0, 8),
-      nextStop: futureStops[0],
+      nextStop: { ...futureStops[0], ...resolveStop(futureStops[0].stopId) },
     });
   }
 
   return normalized;
+};
+
+const loadTrains = async () => {
+  const trips = normalizeLiveTrips(await fetchAllSubwayLines());
+  return {
+    trainCount: trips.length,
+    trains: trips,
+    timestamp: new Date().toISOString(),
+  };
+};
+
+const loadAlerts = () => fetchServiceAlerts();
+
+const loadOutages = async () => {
+  const { current, upcomingCount } = await fetchAccessibilityOutages();
+  return {
+    outages: current,
+    upcomingCount,
+    timestamp: new Date().toISOString(),
+  };
 };
 
 app.get('/api/v1/health', async (_req, res, next) => {
@@ -83,11 +100,7 @@ app.get('/api/v1/health', async (_req, res, next) => {
       status: 'ok',
       service: 'nyc-transit-backend',
       timestamp: new Date().toISOString(),
-      cache: {
-        engine: 'memory',
-        entries: cache.size,
-        keys: [...cache.keys()],
-      },
+      cache: cache.stats(),
       routePlanner: await getRoutePlannerStats(),
     });
   } catch (error) {
@@ -111,19 +124,16 @@ app.get('/api/v1/stations', async (_req, res, next) => {
 
 app.get('/api/v1/trains/live', async (_req, res, next) => {
   try {
-    const result = await getCached('trains:live', 15_000, async () => {
-      const trips = normalizeLiveTrips(await fetchAllSubwayLines());
-      return {
-        trainCount: trips.length,
-        trains: trips,
-        timestamp: new Date().toISOString(),
-      };
+    const result = await cache.get('trains:live', TRAINS_TTL_MS, loadTrains, {
+      maxStaleMs: TRAINS_MAX_STALE_MS,
     });
 
     res.set('Cache-Control', 'no-store');
     res.json({
       ...result.value,
       cached: result.cached,
+      stale: result.stale,
+      ageSeconds: result.ageSeconds,
       cachedAt: result.cachedAt,
     });
   } catch (error) {
@@ -133,12 +143,9 @@ app.get('/api/v1/trains/live', async (_req, res, next) => {
 
 const sendMapData = async (_req, res, next) => {
   try {
-    const stationLines = await getStationRouteLines();
-    const result = await getCached('map:subway', 3_600_000, () =>
-      getMapData(stationLines)
-    );
+    const data = await getMapData(getStationRouteLines);
     res.set('Cache-Control', 'public, max-age=3600');
-    res.json({ ...result.value, cached: result.cached });
+    res.json(data);
   } catch (error) {
     next(error);
   }
@@ -149,21 +156,52 @@ app.get('/api/v1/map', sendMapData);
 
 app.get('/api/v1/accessibility', async (_req, res, next) => {
   try {
-    const result = await getCached('accessibility:outages', 60_000, async () => ({
-      outages: await fetchAccessibilityOutages(),
-      timestamp: new Date().toISOString(),
-    }));
+    const result = await cache.get('accessibility:outages', OUTAGES_TTL_MS, loadOutages, {
+      maxStaleMs: OUTAGES_MAX_STALE_MS,
+    });
     res.set('Cache-Control', 'public, max-age=30');
     res.json({
       ...result.value,
       outageCount: result.value.outages.length,
       cached: result.cached,
+      stale: result.stale,
+      ageSeconds: result.ageSeconds,
       cachedAt: result.cachedAt,
     });
   } catch (error) {
     next(error);
   }
 });
+
+// Optional inputs for route planning. Each fails soft: if a feed is down the
+// route is still planned, without that information.
+const getPlanningContext = async () => {
+  const context = { blockedStationIds: new Set(), alertsByLine: null, outageDataAvailable: true };
+
+  try {
+    const outages = await cache.get('accessibility:outages', OUTAGES_TTL_MS, loadOutages, {
+      maxStaleMs: OUTAGES_MAX_STALE_MS,
+    });
+    for (const outage of outages.value.outages) {
+      // A non-redundant elevator outage removes step-free access to the station.
+      if (outage.equipmentType === 'Elevator' && outage.stopId && !outage.redundant) {
+        context.blockedStationIds.add(outage.stopId);
+      }
+    }
+  } catch (error) {
+    context.outageDataAvailable = false;
+  }
+
+  try {
+    const alerts = await cache.get('alerts:service', ALERTS_TTL_MS, loadAlerts, {
+      maxStaleMs: ALERTS_MAX_STALE_MS,
+    });
+    context.alertsByLine = alerts.value.alertsByLine;
+  } catch (error) {
+    context.alertsByLine = null;
+  }
+  return context;
+};
 
 const sendRoutePlan = async (req, res, next) => {
   try {
@@ -179,11 +217,20 @@ const sendRoutePlan = async (req, res, next) => {
       3,
       Math.max(1, Number(req.query.maxOptions) || 3)
     );
-    const result = await planRoutes(origin, destination, maxOptions);
+    const accessible = ['true', '1'].includes(String(req.query.accessible));
+    const dayType = SERVICE_DAYS.includes(req.query.day) ? req.query.day : serviceDayFor();
+
+    const context = await getPlanningContext();
+    const result = await planRoutes(origin, destination, maxOptions, {
+      accessible,
+      dayType,
+      blockedStationIds: context.blockedStationIds,
+      alertsByLine: context.alertsByLine,
+    });
     if (result.error === 'unknown_station') {
       return res.status(404).json(result);
     }
-    return res.json(result);
+    return res.json({ ...result, outageDataAvailable: context.outageDataAvailable });
   } catch (error) {
     return next(error);
   }
@@ -193,15 +240,22 @@ app.get('/api/v1/routes/plan', sendRoutePlan);
 app.get('/api/v1/routes', sendRoutePlan);
 
 app.get('/full_graph.json', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
   res.sendFile(path.join(PROJECT_DIR, 'full_graph.json'));
 });
 
 app.get('/achievements.js', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
   res.sendFile(path.join(PROJECT_DIR, 'achievements.js'));
 });
 
-app.get('/', (_req, res) => {
-  res.sendFile(FRONTEND_FILE);
+app.get(['/', '/index.html'], (_req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache');
+    res.sendFile(findFrontendFile());
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use('/api', (_req, res) => {
@@ -226,12 +280,18 @@ const start = async () => {
   await Promise.all([initStaticStops(), initRoutePlanner()]);
   const routeStats = await getRoutePlannerStats();
 
+  // Refresh live data in the background while clients are polling, so requests
+  // are served from cache. Pauses after 2 minutes without requests.
+  cache.keepFresh('trains:live', loadTrains, { intervalMs: TRAINS_TTL_MS - 1_000 });
+  cache.keepFresh('accessibility:outages', loadOutages, { intervalMs: OUTAGES_TTL_MS - 5_000 });
+  cache.keepFresh('alerts:service', loadAlerts, { intervalMs: ALERTS_TTL_MS - 5_000 });
+
   const server = app.listen(PORT, () => {
     console.log(`NYC Transit Hub backend listening on http://localhost:${PORT}`);
     console.log(
       `Route planner: ${routeStats.stationNodes} stations, ${routeStats.platformNodes} platform nodes, ${routeStats.routeAwareEdges} route-aware train edges`
     );
-    console.log(`Frontend: ${FRONTEND_FILE}`);
+    console.log(`Frontend: ${findFrontendFile()}`);
   });
 
   const shutdown = () => {

@@ -10,6 +10,17 @@ const GTFS_DIR = path.join(PROJECT_DIR, 'gtfs_supplemented');
 const GRAPH_FILE = path.join(PROJECT_DIR, 'full_graph.json');
 const STOPS_FILE = path.join(GTFS_DIR, 'stops.txt');
 const TRANSFERS_FILE = path.join(GTFS_DIR, 'transfers.txt');
+const ADA_FILE = path.join(BACKEND_DIR, 'data', 'ada_stations.json');
+
+// One graph per service day (built by scripts/buildTransitData.mjs). Falls back
+// to the merged graph when a day-specific file is missing.
+const GRAPH_FILES = {
+  all: 'full_graph.json',
+  weekday: 'full_graph_weekday.json',
+  saturday: 'full_graph_saturday.json',
+  sunday: 'full_graph_sunday.json',
+};
+const DELAY_PENALTY_SECONDS = 240;
 
 const BOARDING_TIME_SECONDS = 45;
 const DEFAULT_TRANSFER_TIME_SECONDS = 180;
@@ -30,8 +41,8 @@ const EXPRESS_ROUTES = new Set([
   'Z',
 ]);
 
-let plannerState = null;
-let initializationPromise = null;
+const statePromises = new Map();
+let adaPromise = null;
 
 const stationNode = (stationId) => `station:${stationId}`;
 const displayRouteId = (routeId) => {
@@ -271,27 +282,44 @@ const buildExpandedGraph = async (rawGraph) => {
   };
 };
 
-export async function initRoutePlanner() {
-  if (plannerState) return plannerState;
-  if (initializationPromise) return initializationPromise;
-
-  initializationPromise = (async () => {
-    const rawGraph = JSON.parse(fs.readFileSync(GRAPH_FILE, 'utf8'));
-    plannerState = await buildExpandedGraph(rawGraph);
-    return plannerState;
-  })();
-
-  try {
-    return await initializationPromise;
-  } catch (error) {
-    initializationPromise = null;
-    throw error;
+const loadState = (dayType) => {
+  if (!statePromises.has(dayType)) {
+    const promise = (async () => {
+      let file = path.join(PROJECT_DIR, GRAPH_FILES[dayType] || GRAPH_FILES.all);
+      if (!fs.existsSync(file)) file = GRAPH_FILE;
+      const rawGraph = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+      return buildExpandedGraph(rawGraph);
+    })();
+    promise.catch(() => statePromises.delete(dayType));
+    statePromises.set(dayType, promise);
   }
+  return statePromises.get(dayType);
+};
+
+export async function initRoutePlanner() {
+  return loadState('all');
 }
 
-const getState = async () => {
-  await initRoutePlanner();
-  return plannerState;
+const getState = (dayType = 'all') => loadState(dayType);
+
+// Static ADA flags per station (data/ada_stations.json); null if not available.
+const loadAdaData = () => {
+  adaPromise ??= fs.promises
+    .readFile(ADA_FILE, 'utf8')
+    .then((text) => JSON.parse(text).stations)
+    .catch(() => null);
+  return adaPromise;
+};
+
+// Day type (weekday / saturday / sunday) in New York for a given instant.
+export const serviceDayFor = (date = new Date()) => {
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'long',
+  }).format(date);
+  if (weekday === 'Saturday') return 'saturday';
+  if (weekday === 'Sunday') return 'sunday';
+  return 'weekday';
 };
 
 const getNodeLabel = (state, node) => {
@@ -318,7 +346,7 @@ const getNodeCoordinates = (state, node) => {
     : null;
 };
 
-const shortestPath = (state, source, destination, blockedLines = new Set()) => {
+const shortestPath = (state, source, destination, blockedLines = new Set(), constraints = null) => {
   const sourceState = `${source}\u0000`;
   const distances = new Map([[sourceState, 0]]);
   const actualTimes = new Map([[sourceState, 0]]);
@@ -339,6 +367,19 @@ const shortestPath = (state, source, destination, blockedLines = new Set()) => {
 
     for (const edge of state.adjacency.get(currentNode) || []) {
       if (edge.kind === 'train' && blockedLines.has(edge.line)) continue;
+      if (constraints?.isPlatformOk && edge.kind === 'walk') {
+        // Boarding / leaving a platform needs step-free access there.
+        const platform = edge.from.startsWith('station:') ? edge.to : edge.from;
+        if (!constraints.isPlatformOk(platform)) continue;
+      }
+      if (constraints?.isStationOk && edge.kind === 'transfer') {
+        if (
+          !constraints.isStationOk(edge.from.slice('station:'.length)) ||
+          !constraints.isStationOk(edge.to.slice('station:'.length))
+        ) {
+          continue;
+        }
+      }
 
       const changesLine =
         edge.kind === 'train' &&
@@ -346,10 +387,12 @@ const shortestPath = (state, source, destination, blockedLines = new Set()) => {
         currentLine !== edge.line;
       const nextLine = edge.kind === 'train' ? edge.line : '';
       const nextState = `${edge.to}\u0000${nextLine}`;
+      const boardsTrain = edge.kind === 'train' && (!currentLine || changesLine);
       const nextDistance =
         current.priority +
         (edge.cost ?? edge.time) +
-        (changesLine ? LINE_CHANGE_PENALTY_SECONDS + 240 : 0);
+        (changesLine ? LINE_CHANGE_PENALTY_SECONDS + 240 : 0) +
+        (boardsTrain ? constraints?.linePenalties?.get(edge.line) || 0 : 0);
       const nextActualTime =
         (actualTimes.get(current.value) ?? 0) +
         edge.time +
@@ -388,6 +431,16 @@ const shortestPath = (state, source, destination, blockedLines = new Set()) => {
     nodes,
     edges,
   };
+};
+
+const haversineMeters = (a, b) => {
+  const toRad = (degrees) => (degrees * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(2 * 6371000 * Math.asin(Math.sqrt(h)));
 };
 
 const buildSegments = (state, path) => {
@@ -435,6 +488,30 @@ const buildSegments = (state, path) => {
       durationSeconds: edge.time,
       stopIds: kind === 'subway' ? [edge.from, edge.to] : [],
     });
+  }
+
+  // Attach map geometry: every stop passed on a subway segment, and the
+  // endpoints of walk/transfer segments.
+  const toPoint = (node) => {
+    const coordinates = getNodeCoordinates(state, node);
+    if (!coordinates) return null;
+    const stop = state.stationByStopId.get(node);
+    return {
+      id: stop?.parentId || node.replace(/^station:/, ''),
+      name: getNodeLabel(state, node),
+      lat: coordinates[1],
+      lon: coordinates[0],
+    };
+  };
+  for (const segment of segments) {
+    if (segment.kind === 'subway') {
+      segment.stops = segment.stopIds.map(toPoint).filter(Boolean);
+    } else {
+      segment.path = [segment.from, segment.to].map(toPoint).filter(Boolean);
+      // Straight-line walking distance between the two stations (metres).
+      segment.distanceMeters =
+        segment.path.length === 2 ? haversineMeters(segment.path[0], segment.path[1]) : 0;
+    }
   }
 
   return segments;
@@ -514,8 +591,16 @@ export async function getStationRouteLines() {
   return state.stationLines;
 }
 
-export async function planRoutes(originQuery, destinationQuery, maxOptions = 3) {
-  const state = await getState();
+export async function planRoutes(originQuery, destinationQuery, maxOptions = 3, options = {}) {
+  const {
+    accessible = false,
+    dayType = 'all',
+    blockedStationIds = new Set(),
+    alertsByLine = null,
+  } = options;
+  const state = await getState(dayType);
+  const adaStations = await loadAdaData();
+
   const findStation = (value) => {
     if (!value) return null;
     const normalized = decodeURIComponent(String(value)).trim();
@@ -538,14 +623,56 @@ export async function planRoutes(originQuery, destinationQuery, maxOptions = 3) 
   }
   if (origin.id === destination.id) return { origin, destination, routes: [] };
 
+  const summary = (station) => ({ id: station.id, name: station.name });
+  const meta = {
+    origin: summary(origin),
+    destination: summary(destination),
+    serviceDay: dayType,
+    accessibleOnly: accessible,
+    accessibilityDataAvailable: Boolean(adaStations),
+    alertsAvailable: Boolean(alertsByLine),
+  };
+
+  // Step-free access rules from the ADA data and current elevator outages.
+  const isStationOk = (id) => {
+    const record = adaStations?.[id];
+    return Boolean(record && record.ada >= 1 && !blockedStationIds.has(id));
+  };
+  const isPlatformOk = (platformId) => {
+    const stationId = state.platformParent.get(platformId);
+    const record = adaStations?.[stationId];
+    if (!record || blockedStationIds.has(stationId)) return false;
+    if (record.ada === 1) return true;
+    if (record.ada !== 2) return false;
+    const side = platformId.slice(-1);
+    return side === 'N' ? record.north : side === 'S' ? record.south : false;
+  };
+
+  if (accessible && !adaStations) {
+    return { ...meta, routes: [], reason: 'accessibility_data_unavailable' };
+  }
+  if (accessible) {
+    if (!isStationOk(origin.id)) return { ...meta, routes: [], reason: 'origin_not_accessible' };
+    if (!isStationOk(destination.id)) return { ...meta, routes: [], reason: 'destination_not_accessible' };
+  }
+
+  const linePenalties = new Map();
+  for (const [line, alerts] of Object.entries(alertsByLine || {})) {
+    if (alerts.some((alert) => alert.kind === 'delay')) linePenalties.set(line, DELAY_PENALTY_SECONDS);
+  }
+  const constraints = {
+    linePenalties,
+    ...(accessible ? { isPlatformOk, isStationOk } : {}),
+  };
+
   const source = stationNode(origin.id);
   const target = stationNode(destination.id);
-  const fastest = shortestPath(state, source, target);
+  const fastest = shortestPath(state, source, target, new Set(), constraints);
   if (!fastest) {
     return {
-      origin: { id: origin.id, name: origin.name },
-      destination: { id: destination.id, name: destination.name },
+      ...meta,
       routes: [],
+      reason: accessible ? 'no_accessible_route' : 'no_route',
       message: 'No connected subway route was found between these stations.',
     };
   }
@@ -556,7 +683,7 @@ export async function planRoutes(originQuery, destinationQuery, maxOptions = 3) 
 
   for (const line of new Set(fastestOption.lines)) {
     if (candidates.length >= Math.max(1, maxOptions)) break;
-    const alternative = shortestPath(state, source, target, new Set([line]));
+    const alternative = shortestPath(state, source, target, new Set([line]), constraints);
     if (!alternative) continue;
 
     const signaturePath = buildRouteOption(
@@ -573,6 +700,16 @@ export async function planRoutes(originQuery, destinationQuery, maxOptions = 3) 
     candidates.push(alternative);
   }
 
+  // A route is step-free when every boarding and alighting platform is.
+  const isRouteAccessible = (route) =>
+    route.segments
+      .filter((segment) => segment.kind === 'subway' && segment.stopIds.length > 1)
+      .every(
+        (segment) =>
+          isPlatformOk(segment.stopIds[0]) &&
+          isPlatformOk(segment.stopIds[segment.stopIds.length - 1])
+      );
+
   const routes = candidates
     .map((candidate, index) =>
       buildRouteOption(state, candidate, index, origin, destination)
@@ -587,11 +724,16 @@ export async function planRoutes(originQuery, destinationQuery, maxOptions = 3) 
       ...route,
       id: index,
       title: index === 0 ? 'Fastest Route' : `Alternative Route ${index}`,
+      isAda: adaStations ? isRouteAccessible(route) : null,
+      alerts: alertsByLine
+        ? [...new Set(route.lines)]
+            .filter((line) => alertsByLine[line]?.length)
+            .map((line) => ({ line, items: alertsByLine[line].slice(0, 3) }))
+        : [],
     }));
 
   return {
-    origin: { id: origin.id, name: origin.name },
-    destination: { id: destination.id, name: destination.name },
+    ...meta,
     generatedAt: new Date().toISOString(),
     routes,
   };

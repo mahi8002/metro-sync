@@ -29,25 +29,19 @@ async function fetchSingleFeed(feedKey, url) {
       new Uint8Array(response.data)
     );
 
+    // Only ids and times are kept here; station names/coordinates are
+    // resolved by the caller (see resolveStop) to keep responses small.
     const tripUpdates = [];
     for (const entity of feed.entity) {
       if (entity.tripUpdate && entity.tripUpdate.stopTimeUpdate) {
         tripUpdates.push({
           tripId: entity.tripUpdate.trip.tripId,
           routeId: entity.tripUpdate.trip.routeId,
-          stopTimeUpdates: entity.tripUpdate.stopTimeUpdate.map((update) => {
-            const stopInfo = getStopDetails(update.stopId);
-            return {
-              stopId: update.stopId,
-              stopName: stopInfo.stopName,
-              lat: stopInfo.lat,
-              lon: stopInfo.lon,
-              arrivalTime: toEpoch(update.arrival ? update.arrival.time : null),
-              departureTime: toEpoch(
-                update.departure ? update.departure.time : null
-              ),
-            };
-          }),
+          stopTimeUpdates: entity.tripUpdate.stopTimeUpdate.map((update) => ({
+            stopId: update.stopId,
+            arrivalTime: toEpoch(update.arrival ? update.arrival.time : null),
+            departureTime: toEpoch(update.departure ? update.departure.time : null),
+          })),
         });
       }
     }
@@ -55,21 +49,26 @@ async function fetchSingleFeed(feedKey, url) {
   } catch (err) {
     // One broken feed should not crash the entire request
     console.error(`[MTA Feed Warning] Failed to fetch feed ${feedKey}: ${err.message}`);
-    return [];
+    return null;
   }
 }
 
+// Name and coordinates for a stop id (used for the next stop only).
+export const resolveStop = (stopId) => {
+  const { stopName, lat, lon } = getStopDetails(stopId);
+  return { stopName, lat, lon };
+};
+
 export async function fetchAllSubwayLines() {
-  // Fetch all 8 feeds concurrently
-  const feedPromises = Object.entries(MTA_FEEDS).map(([key, url]) =>
-    fetchSingleFeed(key, url)
+  // Fetch all feeds concurrently; fetchSingleFeed returns null on failure.
+  const results = await Promise.all(
+    Object.entries(MTA_FEEDS).map(([key, url]) => fetchSingleFeed(key, url))
   );
-  const results = await Promise.allSettled(feedPromises);
 
-  // Flatten arrays from all successful feeds
-  const allTrips = results
-    .filter((res) => res.status === 'fulfilled')
-    .flatMap((res) => res.value);
-
-  return allTrips;
+  const succeeded = results.filter(Boolean);
+  if (succeeded.length === 0) {
+    // Let the cache layer serve stale data instead of caching an empty result.
+    throw new Error('All MTA realtime feeds failed');
+  }
+  return succeeded.flat();
 }

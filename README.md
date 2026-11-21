@@ -8,7 +8,7 @@ journey achievements, and a Leaflet transit map.
 
 Prerequisites:
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - Internet access for MTA feeds, browser libraries, Firebase demo modules, and
   map tiles
 

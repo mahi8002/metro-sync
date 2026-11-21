@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - npm
 - Internet access for live MTA data and external map/browser libraries
 
@@ -49,7 +49,10 @@ To download a fresh full GTFS archive:
 node .\scripts\fetch_gtfs.mjs
 ```
 
-To rebuild the route graph after replacing GTFS data:
+To rebuild all generated data (route graphs for weekday, Saturday and Sunday,
+station order per line, step-free station data, map data) see
+`nyc-transit-backend/README.md` (`npm run build:transit`, `build:ada`,
+`build:map`). The older single-graph script still works:
 
 ```powershell
 node .\scripts\build_graph.js
