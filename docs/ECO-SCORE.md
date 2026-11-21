@@ -55,3 +55,7 @@ remember different train lines along identical tracks can tie. Complete and
 confirm a journey; Profile history must retain its saved score after reload.
 Old journeys, counts and badges must remain. A provider failure shows score
 unavailable. No score is added by simply browsing routes or cancelling arrival.
+
+## Compact rider interface
+
+The route page shows a leaf badge and score instead of a large explanation card. Tap or keyboard-activate the badge for a short, friendly explanation. Calculation & sources is a separate second disclosure containing the unchanged formulas, sources, limitations, distances and manual backup. Reopening the badge starts with the short explanation again. Route cards and saved-trip scores use the same compact badge. Missing data displays a dash rather than zero. Screen-reader labels include the score out of 100. This is a presentation change; scoring, CO2e calculations and stored records are unchanged.
