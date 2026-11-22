@@ -1,9 +1,6 @@
----
-name: metro-ux-eco-score-writing
-description: Write or review Metro Sync's Eco score and carbon-savings wording (the 🌱 icon, Eco sheet, explanations, trip-saved message, profile stats) in the team's approved voice — concise, plain, considerate, with light New York humor — and check that Eco stays out of the way of navigation on mobile. Use when adding or changing Eco / carbon text or placement, or evaluating the Eco score experience.
----
-
 # Metro Sync Eco score writing
+
+How to write and review the Eco score and carbon-savings wording (the 🌱 icon, Eco sheet, explanations, trip-saved message, profile stats), and how to keep Eco out of the way of navigation on mobile. For people and for AI coding tools (Codex, Claude Code, others): follow it whenever you add or change Eco or carbon text or placement.
 
 Metro Sync's job, in order: **fast, accurate navigation** first, nearby suggestions second, gentle encouragement to ride the train (Eco score, badges) third. Wording must never slow down the first job.
 
