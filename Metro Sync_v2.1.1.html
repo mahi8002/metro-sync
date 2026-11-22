@@ -140,16 +140,66 @@
 
     // Click/tap/keyboard disclosure: rider copy first, calculation details on demand.
     const EcoBadge = ({ score, recommended = false }) => <span className={'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-semibold ' + (recommended ? 'border-emerald-500 bg-emerald-950/60 text-emerald-200' : score > 0 ? 'border-emerald-800 bg-emerald-950/20 text-emerald-200' : 'border-slate-600 bg-slate-900 text-slate-300')}
-      aria-label={score == null ? 'Eco score unavailable' : 'Eco score ' + score.toFixed(1) + ' out of 100'}
-      title={recommended ? 'Best estimated carbon savings among these routes' : 'Eco score out of 100'}><span aria-hidden="true">🌱</span><span>{score == null ? '—' : score.toFixed(1)}</span></span>;
+      aria-label={score == null ? 'Eco score not available' : 'Eco score ' + Math.round(score)}
+      title="Eco score: higher means more carbon saved compared with a car ride"><span aria-hidden="true">🌱</span><span>Eco score {score == null ? '—' : Math.round(score)}</span></span>;
+    // Display helpers: stored values stay in kg/km; riders see lb/mi by default.
+    const KG_TO_LB = 2.20462, KM_TO_MI = 0.621371;
+    const formatCarbon = (kg, units) => {
+      const value = units === 'metric' ? kg : kg * KG_TO_LB;
+      return (value < 1 ? value.toFixed(1) : Math.round(value)) + (units === 'metric' ? ' kg' : ' lb');
+    };
+    const formatDistance = (km, units) => (units === 'metric' ? km : km * KM_TO_MI).toFixed(1) + (units === 'metric' ? ' km' : ' mi');
+    // "A car ride" covers your own car, a cab or a rideshare: many riders don't own a car.
+    const carbonSentence = (kg, units) => kg > 0 ? 'About ' + formatCarbon(kg, units) + ' less carbon than a car ride' : 'About the same carbon as a car ride';
+    // Everyday comparison for the Eco sheet: US EPA Greenhouse Gas Equivalencies, ~0.0124 kg CO2 per smartphone charge.
+    // Rounded so it reads as a rough comparison, not a precise figure.
+    const KG_CO2_PER_PHONE_CHARGE = 0.0124;
+    const phoneCharges = (kg) => { const n = kg / KG_CO2_PER_PHONE_CHARGE; return n >= 20 ? Math.round(n / 10) * 10 : Math.max(1, Math.round(n)); };
+    // Eco explanation as an overlay: a bottom sheet on phones, a centered dialog on larger screens.
+    // It never pushes the route cards down.
+    const EcoSheet = ({ onClose, children }) => {
+      const sheetRef = useRef(null);
+      // No body scroll lock: on pages wider than the screen it changes the layout width and pans the view.
+      // The sheet scrolls on its own (overscroll-contain) instead.
+      // Size the sheet to the visible screen (visualViewport), not the page width, so it never opens partly off-screen.
+      const readViewport = () => window.visualViewport ? { left: window.visualViewport.offsetLeft, width: window.visualViewport.width } : null;
+      const [viewport, setViewport] = useState(readViewport);
+      useEffect(() => {
+        sheetRef.current?.querySelector('[data-autofocus]')?.focus({ preventScroll: true });
+        const vv = window.visualViewport;
+        if (!vv) return;
+        const update = () => setViewport(readViewport());
+        vv.addEventListener('resize', update); vv.addEventListener('scroll', update);
+        return () => { vv.removeEventListener('resize', update); vv.removeEventListener('scroll', update); };
+      }, []);
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') { event.stopPropagation(); onClose(); return; }
+        if (event.key !== 'Tab') return;
+        const focusable = sheetRef.current.querySelectorAll('button, summary, select, input, a[href]');
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      };
+      return <div className="fixed inset-y-0 z-[60] flex items-end sm:items-center justify-center bg-slate-950/70" onClick={onClose}
+        style={viewport ? { left: viewport.left, width: viewport.width } : { left: 0, right: 0 }}>
+        <div ref={sheetRef} role="dialog" aria-modal="true" aria-labelledby="eco-sheet-title" onKeyDown={onKeyDown} onClick={e => e.stopPropagation()}
+          className="w-full sm:max-w-md max-h-[85vh] overflow-y-auto overscroll-contain rounded-t-2xl sm:rounded-2xl border border-slate-700 bg-slate-900 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-3 text-sm text-slate-300 shadow-2xl">
+          <div className="flex items-center justify-between gap-3">
+            <h2 id="eco-sheet-title" className="font-bold text-white">🌱 Your Eco score</h2>
+            <button data-autofocus type="button" onClick={onClose} aria-label="Close" className="w-11 h-11 -mr-2 flex items-center justify-center rounded-full text-slate-400 text-2xl leading-none hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">×</button>
+          </div>
+          {children}
+        </div>
+      </div>;
+    };
     const EcoInfo = ({ title, headingId, label, compact = false, score, children }) => {
       const [open, setOpen] = useState(false);
       const panelId = React.useId();
       return <div className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           {!compact && <h2 id={headingId} className="font-bold text-white">{title}</h2>}
-          <button type="button" aria-label={compact ? label + (score == null ? ': score not available' : ': ' + score.toFixed(1) + ' out of 100') : label}
-            title={compact ? 'Your Eco score — tap to peek' : label} aria-expanded={open} aria-controls={panelId}
+          <button type="button" aria-label={compact ? label + (score == null ? ': score not available' : ': ' + Math.round(score)) : label}
+            title={compact ? 'Eco score for the selected route — tap for details' : label} aria-expanded={open} aria-controls={panelId}
             onClick={() => setOpen(value => !value)}
             className={compact ? 'rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 hover:brightness-125' : 'w-8 h-8 shrink-0 rounded-full border border-slate-600 text-blue-300 text-lg hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400'}>
             {compact ? <EcoBadge score={score} /> : 'ⓘ'}
@@ -159,17 +209,21 @@
       </div>;
     };
     const EcoMethodNotes = () => <div className="space-y-3">
-      <h3 className="font-semibold text-white">How we estimate your impact</h3>
-      <p>We compare this subway trip with one person driving a petrol car between the same stations. It is an estimated comparison, not proof that a car journey was avoided.</p>
-      <p>Estimated kg CO₂e saved = driving km × {MetroCarbon.FACTORS.carKgPerKm.toFixed(4)} − subway km × {MetroCarbon.FACTORS.subwayKgPerKm.toFixed(4)}. CO₂e includes greenhouse gases expressed as a carbon dioxide equivalent. Negative values mean higher estimated emissions.</p>
-      <p>Subway distances follow MTA GTFS track shapes, excluding walks. Driving distances come from OSRM road routes. Only public station coordinates are sent; we do not use GPS location.</p>
-      <p>Factors come from <a className="underline text-blue-300" href={MetroCarbon.FACTORS.source} target="_blank" rel="noopener noreferrer">MTA Climate Sustainability Framework (2023), slide 3</a>, using 2020 averages: 1.12 lb CO₂e/passenger-mile for a solo petrol car and 0.11 for subway. They are operational averages, not current line-specific measurements or full life-cycle emissions.</p>
-      <p>Subway suggestions use normal-service patterns, not live departures or closures. Travel times do not include live waiting. Actual emissions vary with the vehicle, electricity and passenger load. The public road-routing demo may be unavailable.</p>
+      <h3 className="font-semibold text-white">How we estimate your carbon savings</h3>
+      <p>We compare your subway ride with the same trip by car: one rider in a gas car, like a solo cab or rideshare. Don't own a car? Plenty of New Yorkers don't. Your ride still counts. It's an estimate, not an exact measurement.</p>
       <h3 className="font-semibold text-white">What your Eco score means</h3>
-      <p>More estimated carbon savings mean a higher score. Score = 100 × positive kg CO₂e saved / (positive kg CO₂e saved + 2). The 2 kg scale is a product design choice, not a scientific coefficient or certified rating. A longer detour with the same endpoints does not earn extra credit. Missing data is unscored; non-positive savings score zero.</p>
-      <p>Candidate routes are ordered by estimated savings, with travel time breaking ties. Scores are per journey, not cumulative reward points. Selecting a different route does not automatically record a trip.</p>
-      <h3 className="font-semibold text-white">Your saved progress</h3>
-      <p>Confirm arrival to save the estimate and score. Older records are kept; trips without distance data are not recalculated. Records are self-reported and saved in this browser, shared across demo accounts, with no cloud sync.</p>
+      <p>Higher score = more carbon saved. 0 means no saving, and 50 means about 4 lb (2 kg) saved. Longer routes don't add points, and no car is needed to earn it.</p>
+      <p>Your trips are saved on this device only.</p>
+      <details><summary className="cursor-pointer text-blue-300">Technical details and sources</summary><div className="space-y-3 mt-3">
+      <p>Estimated kg CO₂e saved = driving km × {MetroCarbon.FACTORS.carKgPerKm.toFixed(4)} − subway km × {MetroCarbon.FACTORS.subwayKgPerKm.toFixed(4)}. CO₂e includes greenhouse gases expressed as a carbon dioxide equivalent. If the subway route is much longer than the drive, the saving can be zero.</p>
+      <p>Subway distances follow MTA GTFS track shapes, excluding walks. Driving distances come from OSRM road routes. Only public station coordinates are sent; we do not use GPS location.</p>
+      <p>Factors come from <a className="underline text-blue-300" href={MetroCarbon.FACTORS.source} target="_blank" rel="noopener noreferrer">MTA Climate Sustainability Framework (2023), slide 3</a>, using 2020 averages: 1.12 lb CO₂e/passenger-mile for one person driving a gas car and 0.11 for subway. They are operational averages, not current line-specific measurements or full life-cycle emissions.</p>
+      <p>Subway suggestions use normal-service patterns, not live departures or closures. Travel times do not include live waiting. Actual emissions vary with the vehicle, electricity and passenger load. The public road-routing demo may be unavailable.</p>
+      <p>Score = 100 × positive kg CO₂e saved / (positive kg CO₂e saved + 2). The 2 kg scale is a product design choice, not a scientific coefficient or certified rating. A longer detour with the same endpoints does not earn extra credit. Missing data is unscored; non-positive savings score zero.</p>
+      <p>Phone-charge comparison: about 0.0124 kg CO₂ per smartphone charge, from the U.S. EPA Greenhouse Gas Equivalencies Calculator, rounded to the nearest 10. It's a rough everyday comparison, not an exact equivalent.</p>
+      <p>Routes are listed by travel time. The route with the most estimated savings is tagged "Lowest carbon option". Scores are per journey, not cumulative reward points. Selecting a different route does not automatically record a trip.</p>
+      <p>Confirm arrival to save the estimate and score. Older records are kept; trips without distance data are not recalculated. Records are saved in this browser only, with no cloud sync.</p>
+      </div></details>
     </div>;
 
     // Official MTA Trunk Line Palette Specs
@@ -375,7 +429,22 @@
       const knownUnlocks = useRef(new Set(Object.keys(achievementProfile.unlocked)));
       const achievementStats = MetroAchievements.stats(achievementProfile);
       const carbonSummary = MetroCarbon.summarize(achievementProfile.trips);
-      const ecoMetrics = { totalRides: achievementStats.rides, co2SavedKg: carbonSummary.estimatedJourneys ? carbonSummary.savingsKgCO2e.toFixed(2) : null };
+      const ecoMetrics = { totalRides: achievementStats.rides, co2SavedKg: carbonSummary.estimatedJourneys ? carbonSummary.savingsKgCO2e : null };
+      // Display units only ('us' = lb/mi, 'metric' = kg/km); saved trip data stays in kg/km.
+      const [units, setUnits] = useState(() => {
+        // A saved choice wins; otherwise US English browsers get lb/mi and everyone else (e.g. visitors) gets kg/km.
+        const fromBrowser = (navigator.language || 'en-US').toLowerCase() === 'en-us' ? 'us' : 'metric';
+        try { const saved = localStorage.getItem('metro_sync_units'); return saved === 'metric' || saved === 'us' ? saved : fromBrowser; } catch { return fromBrowser; }
+      });
+      // Only remember units when the rider picks them, so the browser-language default keeps working until then.
+      const chooseUnits = (value) => { setUnits(value); try { localStorage.setItem('metro_sync_units', value); } catch {} };
+      // Eco explanation sheet; focus returns to the button that opened it.
+      const [ecoSheetOpen, setEcoSheetOpen] = useState(false);
+      const ecoSheetTriggerRef = useRef(null);
+      const openEcoSheet = (event) => { ecoSheetTriggerRef.current = event.currentTarget; setEcoSheetOpen(true); };
+      const closeEcoSheet = () => { setEcoSheetOpen(false); setTimeout(() => ecoSheetTriggerRef.current?.focus(), 0); };
+      // Manual distance entry is a developer fallback; open the app with ?debug to show it.
+      const showManualDistance = new URLSearchParams(window.location.search).has('debug');
       const [carbonDraft, setCarbonDraft] = useState(null);
       const [pendingCompletion, setPendingCompletion] = useState(null);
       const completionTriggerRef = useRef(null);
@@ -410,9 +479,16 @@
         MetroCarbon.estimateAutomatic(currentItinerary, roadState.data, comparisonMode);
       const selectedEcoScore = MetroEcoScore.fromSnapshot(carbonEstimate);
       const matchingRoutes = routeResults.filter(r => r.originId === STATIONS_DATA[origin].mta_id && r.destinationId === STATIONS_DATA[destination].mta_id);
-      const routeCards = distanceMode === 'automatic' && roadIsCurrent && roadState.status === 'ready'
+      // Eco scores are attached for display only: cards keep the planner's travel-time order.
+      const plannerOrder = new Map(matchingRoutes.map((r, index) => [r.id, index]));
+      const scoredRoutes = distanceMode === 'automatic' && roadIsCurrent && roadState.status === 'ready'
         ? MetroEcoScore.rankRoutes(matchingRoutes, roadState.data)
         : matchingRoutes.map(r => ({ ...r, ecoScore: distanceMode === 'manual' && r.id === selectedRouteOption ? selectedEcoScore : null, ecoRecommended: false }));
+      const routeCards = [...scoredRoutes].sort((a, b) => plannerOrder.get(a.id) - plannerOrder.get(b.id));
+      // Only tag "Lowest carbon option" when one route clearly saves more than the others.
+      const routeSavings = routeCards.map(r => r.ecoScore?.estimatedSavingsKgCO2e).filter(v => typeof v === 'number');
+      const lowestCarbonIsDistinct = routeSavings.length > 1 && new Set(routeSavings.map(v => v.toFixed(2))).size > 1;
+      const ecoUnavailable = origin !== destination && distanceMode === 'automatic' && (Boolean(transitError) || (roadIsCurrent && roadState.status === 'error'));
       const updateCarbonInput = (field, value) => setCarbonDraft({ ...carbonInput, routeKey: carbonRouteKey, [field]: value });
       useEffect(() => { setCarbonDraft(null); }, [carbonRouteKey]);
       useEffect(() => { if (!pendingCompletion) completionTriggerRef.current?.focus(); }, [pendingCompletion]);
@@ -695,7 +771,7 @@
               }}>
               <h2 id="complete-journey-title" className="font-bold text-lg">Confirm journey completion</h2>
               <p className="text-sm">Have you arrived? This is a self-reported journey; only its origin and destination count as visited.</p>
-              <p className="text-sm">{pendingCompletion.snapshot.status === 'estimated' ? pendingCompletion.snapshot.estimatedSavingsKgCO2e.toFixed(2) + ' kg CO₂e estimated difference and its Eco score will be saved with this journey.' : 'No CO₂e estimate is available. The journey will still count toward badges.'}</p>
+              <p className="text-sm">{pendingCompletion.snapshot.status === 'estimated' ? "We'll save this trip: " + carbonSentence(pendingCompletion.snapshot.estimatedSavingsKgCO2e, units).replace(/^About/, 'about') + (pendingCompletion.snapshot.ecoScore ? ' (Eco score ' + Math.round(pendingCompletion.snapshot.ecoScore.value) + ')' : '') + (pendingCompletion.snapshot.estimatedSavingsKgCO2e > 0 ? '. The city thanks you. 🗽' : '.') : "We couldn't estimate carbon for this trip, but it still counts toward your badges."}</p>
               <div className="flex justify-end gap-3">
                 <button autoFocus onClick={() => setPendingCompletion(null)} className="px-4 py-2 rounded border border-slate-600">Cancel</button>
                 <button onClick={confirmJourneyCompletion} className="px-4 py-2 rounded bg-blue-600 text-white font-bold">Confirm arrival</button>
@@ -989,26 +1065,33 @@
                       <p className="text-base font-bold text-white">{ecoMetrics.totalRides}</p>
                     </div>
                     <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
-                      <p className="text-xs text-slate-400">Estimated CO₂e Avoided</p>
-                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg === null ? 'Not estimated' : ecoMetrics.co2SavedKg + ' kg'}</p>
+                      <p className="text-xs text-slate-400">Carbon saved (est.)</p>
+                      <p className="text-base font-bold text-emerald-400">{ecoMetrics.co2SavedKg === null ? 'Not estimated' : 'About ' + formatCarbon(Math.max(0, ecoMetrics.co2SavedKg), units)}</p>
                     </div>
                   </div>
                 </div>
 
                 <section aria-labelledby="carbon-summary-title" className="p-5 rounded-2xl border border-slate-800 bg-slate-950/80 space-y-3 text-xs text-slate-300">
                   <EcoInfo title="Your greener trips" headingId="carbon-summary-title" label="About your saved carbon estimates">
-                    <p>Little trips, lasting progress. 🌱 Your completed rides and estimated savings live here.</p>
-                    <details><summary className="cursor-pointer text-blue-300">Calculation &amp; sources</summary><div className="mt-3"><EcoMethodNotes /></div></details>
+                    <p>Little trips, lasting progress. 🌱 Here's every ride where you let the train do the driving, and the carbon you saved along the way.</p>
+                    <details><summary className="cursor-pointer text-blue-300">How we calculate this</summary><div className="mt-3"><EcoMethodNotes /></div></details>
                   </EcoInfo>
-                  <p>Carbon estimates available for {carbonSummary.estimatedJourneys} of your {achievementStats.rides} completed trips. Every completed trip counts toward your badges.</p>
+                  <p>We could estimate carbon for {carbonSummary.estimatedJourneys} of your {achievementStats.rides} trips. {achievementStats.rides === 1 ? 'It counts' : 'All ' + achievementStats.rides + ' count'} toward your badges.</p>
+                  <div role="group" aria-label="Units" className="flex items-center gap-2">
+                    <span className="text-slate-400">Units:</span>
+                    {[['us', 'Miles & lb'], ['metric', 'Kilometers & kg']].map(([value, text]) => (
+                      <button key={value} type="button" aria-pressed={units === value} onClick={() => chooseUnits(value)}
+                        className={'px-2.5 py-1 rounded-lg border font-semibold ' + (units === value ? 'bg-blue-600 border-blue-400 text-white' : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white')}>{text}</button>
+                    ))}
+                  </div>
                                     <details><summary className="cursor-pointer text-blue-300">Your trip history</summary>
                     <p className="mt-2">Your latest 20 completed trips. Earlier trips are still saved.</p>
                     <ul className="space-y-3 mt-3">{achievementProfile.trips.slice(-20).reverse().map(trip => <li key={trip.id} className="p-3 rounded border border-slate-700">
                       <p>{STATIONS_DATA[trip.origin]?.name || trip.origin} → {STATIONS_DATA[trip.destination]?.name || trip.destination} · {new Date(trip.completedAt).toLocaleString()}</p>
                       {MetroCarbon.validSnapshot(trip.carbon) ? <div>
-                        <p>{trip.carbon.estimatedSavingsKgCO2e.toFixed(2)} kg CO₂e avoided · driving {trip.carbon.drivingDistanceKm.toFixed(2)} km / subway {trip.carbon.transitDistanceKm.toFixed(2)} km</p>
+                        <p>{carbonSentence(trip.carbon.estimatedSavingsKgCO2e, units)} · {formatDistance(trip.carbon.transitDistanceKm, units)} by subway</p>
                         <div className="my-2"><EcoBadge score={MetroEcoScore.fromSnapshot(trip.carbon)?.value} /></div>
-                        <details><summary className="cursor-pointer text-blue-300" aria-label="About this saved trip’s estimate">ⓘ About this estimate</summary><p className="mt-2">A little snapshot of this ride’s estimated impact. 🌱</p><details className="mt-2"><summary className="cursor-pointer text-blue-300">Calculation &amp; sources</summary><p className="mt-2">Distance source: {trip.carbon.distanceSource}. Model: {trip.carbon.methodVersion}; factor data: {trip.carbon.factorDataYear}.</p><p>{trip.carbon.ecoScore ? 'Score saved when this trip was completed.' : 'Score derived from the saved estimate; the original trip record is unchanged.'}</p></details></details>
+                        <details><summary className="cursor-pointer text-blue-300" aria-label="About this saved trip’s estimate">ⓘ About this estimate</summary><p className="mt-2">Compared with one person driving {formatDistance(trip.carbon.drivingDistanceKm, units)} between the same stations. 🌱</p><details className="mt-2"><summary className="cursor-pointer text-blue-300">Technical details</summary><p className="mt-2">Distance source: {trip.carbon.distanceSource}. Model: {trip.carbon.methodVersion}; factor data: {trip.carbon.factorDataYear}.</p><p>{trip.carbon.ecoScore ? 'Score saved when this trip was completed.' : 'Score derived from the saved estimate; the original trip record is unchanged.'}</p></details></details>
                       </div> : <p>No carbon estimate for this trip. It still counts toward your badges.</p>}
                     </li>)}</ul>
                   </details>
@@ -1193,35 +1276,37 @@
                     </div>
                   </div>
 
-                  <section aria-label="Your Eco badge" className="text-xs text-slate-300">
-                    <EcoInfo compact score={selectedEcoScore?.value} label="About your Eco badge">
-                      <p className="font-semibold text-emerald-200">{carbonEstimate.status === 'estimated' && carbonEstimate.estimatedSavingsKgCO2e > 0 ? 'Small badge. Greener moves. 🌱' : 'Every trip has a story. 🚇'}</p>
-                      <p>{origin === destination ? 'Pick two different stations to meet your Eco score.' :
-                        carbonEstimate.status === 'estimated' ? (carbonEstimate.estimatedSavingsKgCO2e > 0 ? 'About ' + carbonEstimate.estimatedSavingsKgCO2e.toFixed(2) + ' kg less CO₂e than driving alone, estimated.' : 'No estimated carbon saving compared with driving alone on this route.') :
-                        distanceMode === 'manual' ? 'Add your trip distances under Calculation & sources to see a score.' :
-                        transitError || (roadIsCurrent && roadState.status === 'error') ? 'No score yet. Give it another try.' : 'Your little leaf is loading…'}</p>
-                      <p>Higher scores mean more estimated carbon savings—not extra points for detours.</p>
-                      {distanceMode === 'automatic' && origin !== destination && <button className="underline text-blue-300" onClick={() => {
+                  <span role="status" aria-live="polite" className="sr-only">{selectedEcoScore ? 'Eco score ' + Math.round(selectedEcoScore.value) : ''}</span>
+                  {ecoSheetOpen && (
+                    <EcoSheet onClose={closeEcoSheet}>
+                      {/* Two short lines; the score rule and humor live under How we calculate this. */}
+                      <p className="font-semibold text-white">{origin === destination ? 'Choose two different stations to see your Eco score.' :
+                        carbonEstimate.status === 'estimated' ? carbonSentence(carbonEstimate.estimatedSavingsKgCO2e, units) + (selectedEcoScore ? ' · Eco score ' + Math.round(selectedEcoScore.value) : '') :
+                        distanceMode === 'manual' ? 'Add your trip distances under How we calculate this to see a score.' :
+                        transitError || (roadIsCurrent && roadState.status === 'error') ? "We couldn't get the distances for this trip." : 'Working out your carbon savings…'}</p>
+                      {carbonEstimate.status === 'estimated' && <p>{carbonEstimate.estimatedSavingsKgCO2e > 0 ? "That's like skipping " + phoneCharges(carbonEstimate.estimatedSavingsKgCO2e) + ' phone charges.' : 'Every ride still counts toward your badges.'}</p>}
+                      {lowestCarbonIsDistinct && routeCards.find(r => r.ecoRecommended) && <p className="text-slate-400">Lowest carbon option: {routeCards.find(r => r.ecoRecommended).title.replace('GTFS', 'subway')}.</p>}
+                      {ecoUnavailable && <button type="button" className="min-h-[44px] px-4 rounded-lg border border-slate-600 text-blue-300 font-semibold hover:bg-slate-800" onClick={() => {
                         roadClient.clearCache(); setRoadState({ status: 'loading' }); setRoadRetry(n => n + 1);
                         if (transitError) setTransitRetry(n => n + 1);
-                      }}>{transitError || (roadIsCurrent && roadState.status === 'error') ? 'Try again' : 'Refresh estimate'}</button>}
-                      <details><summary className="cursor-pointer text-blue-300">Calculation &amp; sources</summary>
+                      }}>Try again</button>}
+                      <details><summary className="cursor-pointer text-blue-300 py-2">How we calculate this</summary>
                         <div className="space-y-3 mt-3">                      <EcoMethodNotes />
-                      <h3 className="font-semibold text-white">Distances for this trip</h3>
-                      <p>Current calculation: {STATIONS_DATA[origin].name} → {STATIONS_DATA[destination].name}</p>
-                      <p>Subway: {origin === destination ? 'Same station' : currentItinerary ? currentItinerary.transitDistanceKm.toFixed(2) + ' km' : transitError || 'Loading…'} · Driving: {origin === destination ? 'Same station' : roadIsCurrent && roadState.status === 'ready' ? roadState.data.drivingDistanceKm.toFixed(2) + ' km' : roadIsCurrent && roadState.status === 'error' ? 'Unavailable' : 'Calculating…'}</p>
-                      <p>Road provider: {globalThis.MetroDistanceConfig?.roadEndpoint || 'OSRM'}. Public demo service is for development and has no availability guarantee.</p>
-                      {carbonEstimate.status === 'estimated' ? <p>Driving: {carbonEstimate.carEmissionsKgCO2e.toFixed(2)} kg; subway: {carbonEstimate.transitEmissionsKgCO2e.toFixed(2)} kg CO₂e.</p> : <p>{carbonEstimate.reason}</p>}
-                      <label className="block">Distance calculation
+                      <h3 className="font-semibold text-white">This trip</h3>
+                      <p>{STATIONS_DATA[origin].name} → {STATIONS_DATA[destination].name}</p>
+                      <p>Subway: {origin === destination ? 'Same station' : currentItinerary ? formatDistance(currentItinerary.transitDistanceKm, units) : transitError || 'Loading…'} · By car: {origin === destination ? 'Same station' : roadIsCurrent && roadState.status === 'ready' ? formatDistance(roadState.data.drivingDistanceKm, units) : roadIsCurrent && roadState.status === 'error' ? 'Unavailable' : 'Calculating…'}</p>
+                      {carbonEstimate.status === 'estimated' ? <p>By car: about {formatCarbon(carbonEstimate.carEmissionsKgCO2e, units)} carbon · by subway: about {formatCarbon(carbonEstimate.transitEmissionsKgCO2e, units)}.</p> : <p>{carbonEstimate.reason}</p>}
+                      <p className="text-slate-500">Driving distances come from {globalThis.MetroDistanceConfig?.roadEndpoint ? 'a road-routing service' : 'OSRM, a public road-routing demo'}, which can sometimes be unavailable.</p>
+                      {showManualDistance && <label className="block">Distance calculation (developer)
                         <select aria-label="Distance calculation mode" value={distanceMode} onChange={e => setDistanceMode(e.target.value)} className="block w-full p-2 mt-1 bg-slate-950 border border-slate-700 rounded">
                           <option value="automatic">Automatic</option><option value="manual">Enter distances yourself</option>
                         </select>
-                      </label>
+                      </label>}
                       {distanceMode === 'manual' && <div className="space-y-3">
                     <p>Backup only: enter verified distances and source for the selected itinerary.</p>
                     <label className="block">Distance unit
                       <select aria-label="CO2 distance unit" value={carbonInput.unit} onChange={e => { setCarbonDraft({ ...carbonInput, routeKey: carbonRouteKey, unit: e.target.value, drivingDistance: '', transitDistance: '' }); }} className="block w-full p-2 mt-1 bg-slate-900 border border-slate-700 rounded">
-                        <option value="km">Kilometres (km)</option><option value="mi">Miles (mi)</option>
+                        <option value="km">Kilometers (km)</option><option value="mi">Miles (mi)</option>
                       </select>
                     </label>
                     <div className="grid grid-cols-2 gap-3">
@@ -1235,9 +1320,8 @@
 
 </div>
                       </details>
-                    </EcoInfo>
-                    <span role="status" aria-live="polite" className="sr-only">{selectedEcoScore ? 'Eco score ' + selectedEcoScore.value.toFixed(1) + ' out of 100' : 'Eco score not available yet. Open your Eco badge for details.'}</span>
-                  </section>
+                    </EcoSheet>
+                  )}
                   {/* Calculated Route Cards */}
                   {transitError && origin !== destination && routeResults.length === 0 && <div className="p-4 rounded-xl border border-amber-700 text-sm text-amber-200 space-y-2">
                     <p>We couldn’t find a route right now. Try again above, or record your completed trip without a carbon estimate.</p>
@@ -1261,7 +1345,7 @@
 
                               {opt.isAda && <span className="text-[10px] text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded border border-blue-800">♿ Accessible</span>}
                             </h3>
-                            <p className="text-xs text-slate-400 mt-0.5">About {opt.duration} mins • {opt.transfers} transfer(s) • {opt.transitDistanceKm.toFixed(2)} km by subway</p>
+                            <p className="text-xs text-slate-400 mt-0.5">About {opt.duration} mins • {opt.transfers === 0 ? 'No transfers' : opt.transfers === 1 ? '1 transfer' : opt.transfers + ' transfers'} • {formatDistance(opt.transitDistanceKm, units)} by subway</p>
                           </div>
                           <div className="flex items-center space-x-1.5">
                             {opt.lines.map((l, idx) => (
@@ -1275,7 +1359,6 @@
                           </div>
                         </div>
 
-                        <div className="mb-2"><EcoBadge score={opt.ecoScore?.value} recommended={opt.ecoRecommended} /></div>
                         {/* Step Details */}
                         <div className="space-y-1.5 my-3 pl-2 border-l-2 border-slate-800 text-xs text-slate-300">
                           {opt.steps.map((st, i) => (
@@ -1284,6 +1367,7 @@
                             </p>
                           ))}
                         </div>
+                        {/* Eco line: information only, never changes route order */}
 
                         {/* Actions */}
                         <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
@@ -1308,6 +1392,16 @@
                         </div>
                       </div>
                     ))}
+                    {/* Eco entry point: one small icon under the routes, shown only once routes are listed. No text, so it never competes with navigation. */}
+                    {routeCards.length > 0 && origin !== destination && (
+                      <button type="button" onClick={openEcoSheet} aria-haspopup="dialog"
+                        aria-label={selectedEcoScore ? 'Eco score ' + Math.round(selectedEcoScore.value) + ': ' + carbonSentence(carbonEstimate.estimatedSavingsKgCO2e, units) + '. Show details' : 'Eco score details'}
+                        title="Eco score"
+                        className="ml-1 min-w-[44px] min-h-[44px] px-2 inline-flex items-center justify-center gap-1 rounded-full text-slate-400 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">
+                        <span aria-hidden="true" className="text-base leading-none">🌱</span>
+                        <span aria-hidden="true" className="w-4 h-4 rounded-full border border-slate-600 text-[10px] font-bold leading-[14px] text-center text-blue-300">i</span>
+                      </button>
+                    )}
                   </div>
 
                   {/* Places Near Destination */}
