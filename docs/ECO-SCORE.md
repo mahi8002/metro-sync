@@ -19,12 +19,15 @@ trips avoid more petrol-car emissions and score higher. A detour with the same
 driving baseline consumes more transit energy and scores lower. Non-positive
 comparisons score zero; missing distance data is unavailable, never a zero score.
 
-Automatic route cards are ranked using the unrounded estimated avoided CO2e
-across available candidate routes with the same station pair and driving result.
-Ties prefer shorter travel time, then original route ID. Only the top positive
-candidate receives an Eco recommendation badge. This compares available static
-suggestions, not every possible itinerary or real-time service. User selection
-is retained when the recommendation arrives, rather than silently switching it.
+`MetroEcoScore.rankRoutes` scores candidate routes with the same station pair
+and driving result, using the unrounded estimated avoided CO2e. Ties prefer
+shorter travel time, then original route ID. Only the top positive candidate is
+marked as the Eco recommendation. The page displays route cards in the
+planner's travel-time order, not the Eco ranking, and shows "Lowest carbon
+option" in the Eco sheet only when one route saves more than the others. This
+compares available static suggestions, not every possible itinerary or
+real-time service. User selection is retained when scores arrive, rather than
+silently switching it.
 
 In manual backup mode, only the entered itinerary has a score. Incomparable
 alternatives are not ranked using that manually entered mileage.
