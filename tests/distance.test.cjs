@@ -19,13 +19,12 @@ assert.deepEqual(D.planRoutes(state, '127', '127'), []);
 assert.throws(() => D.planRoutes(state, 'invalid', '127'));
 const disconnected = D.prepare({ ...network, edges: {}, transfers: [] });
 assert.deepEqual(D.planRoutes(disconnected, '127', '235'), []);
-const page = fs.readFileSync(path.join(__dirname, '../Metro Sync_v2.1.1.html'), 'utf8');
-const stationLiteral = page.match(/const STATIONS_DATA = (\{[\s\S]*?\n    \});/)[1];
-const stations = Object.values(vm.runInNewContext('(' + stationLiteral + ')'));
+// Stable representative network pairs: the UI now loads the full station directory from the backend.
+const stations = ['125', '127', '726', '128', 'D17', '631', '635', 'E01', '229', '235'];
 for (const origin of stations) for (const destination of stations) {
-  if (origin.id === destination.id) continue;
-  const planned = D.planRoutes(state, origin.mta_id, destination.mta_id, 1);
-  assert.ok(planned.length, `No route for ${origin.id} > ${destination.id}`);
+  if (origin === destination) continue;
+  const planned = D.planRoutes(state, origin, destination, 1);
+  assert.ok(planned.length, `No route for ${origin} > ${destination}`);
   assert.ok(planned[0].transitDistanceKm > 0);
 }
 console.log('GTFS routes:', routes.map(r => ({ lines: r.lines, km: r.transitDistanceKm, stops: r.trainSegments.length })));

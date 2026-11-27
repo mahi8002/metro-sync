@@ -1,62 +1,50 @@
 # Automatic subway, driving and CO2e estimates
 
-## Run locally
+## Run locally after the main integration
 
-No npm installation or API key is needed. Node.js 18+ is required for the local
-server and tests. The page still uses its existing CDN libraries and map tiles.
+Use Node.js 22+ (the same version family as CI). The main branch's backend now
+provides station search, service-day routing, live updates and accessibility.
+The frontend measures the exact platform hops of that backend-selected route
+against the bundled GTFS track shapes. Missing matches remain unestimated;
+an independently planned route or straight-line distance is never substituted.
+Road distances still come from OSRM; the carbon factors and score formula are unchanged.
 
+```powershell
+cd G:\gitclone\metro-sync\nyc-transit-backend
+npm ci
+npm start
 ```
-cd G:\gitclone\metro-sync
-node scripts/serve.cjs
-```
 
-Open http://127.0.0.1:5500/ . An existing static server such as VS Code Live Server
-also works when it serves the repository root, including `data/`, `distance.js`,
-`distance-config.js`, `carbon.js`, and `achievements.js`.
+Open http://127.0.0.1:5000/ for the frontend and API on one origin.
+The backend serves the Eco JavaScript and generated transit-distance JSON.
 
-**Keep the same browser, hostname and port as before to see existing history.**
-`localhost` and `127.0.0.1`, different ports and browser profiles have separate
-localStorage. Do not clear storage to install this update. If port 5500 is busy,
-keep using your existing static server, or select another PORT for an isolated
-test profile. Opening the HTML as a file:// URL cannot reliably fetch the JSON.
+**To retain history from http://127.0.0.1:5500/, keep using that exact origin.**
+In a second terminal, run `node scripts/serve.cjs` from the repository root,
+or keep the existing VS Code Live Server. Leave the backend running on port 5000.
+Browser storage differs by browser, hostname and port. Do not clear it.
 
-## Manual verification
+Old records and carbon snapshots remain unchanged. Old short station IDs are
+recognized when restoring station selections and favorites. A completed legacy
+active journey is not restarted. New journeys use Start Journey, Complete Journey
+and Cancel Journey from main. The estimate for the clicked route is captured at
+Start Journey and saved on completion; later searches cannot change it. A journey
+started before distances are available can still earn badges without an estimate.
 
-1. Refresh the current page with Ctrl+F5. In Profile & Favorites, confirm existing
-   trip counts, badges, unlock dates and manually estimated journeys are intact.
-   Old journeys without distances remain unestimated; they are not fabricated
-   or retroactively assigned today's route.
-2. In Map & Routes, select Times Sq - 42 St to Atlantic Av - Barclays Ctr. Keep
-   Distance calculation on Automatic. Do not enter any mileage. After loading,
-   the supplied data currently gives a subway itinerary on line 2 or 3 around
-   10.10 km. A real OSRM check returned driving 9.69 km and about 2.75 kg CO2e
-   avoided. Road data may change, so these are examples, not hard-coded values.
-3. Select an alternative route card. Its subway itinerary and track distance
-   determine the comparison; driving distance is shared for the same endpoints.
-   Different lines on the same tracks can legitimately have the same distance.
-4. Click Complete Journey, then Cancel: no completed journey or estimate is added.
-   Repeat and select Confirm arrival. Profile history should contain the two
-   distances, automatic source and distance-v2 model. The original badge rules
-   still apply. Refresh: the recorded estimate should remain unchanged.
-5. Repeated completion of the same journey ID is prevented. Start Another Journey
-   explicitly creates a separate journey; it does not count as completed until
-   arrival is confirmed.
-6. Change the destination to Penn Station. Subway distance is around 0.62 km and
-   a fresh driving result is used. Quickly switch several endpoints: an older
-   road response must never replace the current pair's result.
-7. For failure testing, use an isolated test browser profile and block requests to
-   router.project-osrm.org in browser developer tools, or temporarily configure
-   an unreachable endpoint in distance-config.js and reload. The page must show
-   Unavailable and Retry driving distance, not zero or a made-up straight line.
-   After failure you can record a badge-only journey or choose Manual backup.
-   Restore the configuration/request access after the test.
-8. If the subway JSON cannot load, Retry subway data is available. A self-reported
-   badge-only completion remains possible without inventing a route or mileage.
-9. The comparison is fixed to one person driving a petrol car; there is no scenario selector. The page explains that this is a comparison, not a verified car trip avoided. Manual backup remains available with km/mile input and a required distance source, and retains distance-v1 snapshots.
+## Updated smoke-test flow
 
-Use a separate profile for synthetic test trips rather than deleting personal
-records. Application data remains browser-local and shared across demo accounts;
-this change does not introduce Firebase synchronization.
+1. Refresh the existing origin and inspect Profile & Favorites: previous history,
+   unlock dates and saved carbon snapshots must remain intact.
+2. Search Times Sq-42 St to Atlantic Av-Barclays Ctr. Open the small leaf/info
+   button under the routes. Expect about 10.1 km by subway and a live road estimate.
+   Values and service-day alternatives may change.
+3. Choose an alternative and start that route. Complete it after arrival. The
+   history entry must contain that route's snapshot, score, distances and sources.
+4. Starting and cancelling must not add a completed trip. Completing twice must
+   not duplicate the journey. A page reload must preserve completed estimates.
+5. Change endpoints quickly. Previous route or road responses must not replace
+   the current pair. Accessible-only and language controls from main still work.
+6. An OSRM error or unmatched GTFS hop must leave the estimate unavailable; it
+   must never fabricate mileage. Manual fallback is available with `?debug`.
 
 ## Automated checks
 
@@ -81,6 +69,13 @@ node tests/live-distance-smoke.cjs
 ```
 
 ## Subway distance and itinerary source
+
+The main frontend uses the backend planner (including service-day and accessibility
+choices). `MetroDistance.measureRoute` matches every returned subway platform hop
+and route ID to the bundled shape edges, sums train arcs and excludes walking.
+If a hop cannot be matched, the route stays usable but has no automatic Eco estimate.
+`MetroDistance.planRoutes` is retained for offline module checks, not used to replace
+the backend-selected itinerary in the main page.
 
 `data/transit-network.json` is a self-contained build artifact from the MTA's
 official regular subway GTFS archive:

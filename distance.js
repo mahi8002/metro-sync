@@ -94,6 +94,31 @@
     }
     return options.sort((a, b) => a.duration - b.duration).map((r, id) => ({ ...r, id, title: id ? `Alternative GTFS Route ${id}` : 'Suggested GTFS Route' }));
   }
+  // Measure the backend-selected itinerary, never substitute an independently planned trip.
+  // Every platform hop must match the line and direction in the bundled GTFS shapes.
+  function measureRoute(state, route) {
+    if (!state || !Array.isArray(route?.segments)) return route;
+    const edges = [];
+    for (const segment of route.segments) {
+      if (segment.kind !== 'subway') continue;
+      if (!Array.isArray(segment.stopIds) || segment.stopIds.length < 2) return route;
+      for (let i = 1; i < segment.stopIds.length; i++) {
+        const from = segment.stopIds[i - 1], to = segment.stopIds[i];
+        const candidates = (state.network.edges[from] || []).filter(e =>
+          e.to === to && e.route === segment.routeId && e.distanceKm > 0 && state.network.shapes[e.shape]);
+        if (!candidates.length) return route;
+        // A stop pair may occur on multiple shapes. Prefer the normal shortest track arc.
+        const edge = candidates.reduce((a, b) => a.distanceKm <= b.distanceKm ? a : b);
+        edges.push({ ...edge, from, kind: 'train' });
+      }
+    }
+    if (!edges.length) return route;
+    const measured = option(state, { edges, seconds: route.durationSeconds }, route.originId, route.destinationId);
+    return { ...route, transitDistanceKm: measured.transitDistanceKm,
+      routeKey: measured.routeKey, trainSegments: measured.trainSegments,
+      transitSource: measured.transitSource, transitDataVersion: measured.transitDataVersion,
+      transitGeneratedAt: measured.transitGeneratedAt };
+  }
   function parseRoadResponse(data) {
     const route = data?.routes?.[0];
     if (data?.code !== 'Ok' || typeof route?.distance !== 'number' || !Number.isFinite(route.distance) || route.distance <= 0 || route.distance > 2000000) throw new Error('No valid driving route was returned.');
@@ -142,5 +167,5 @@
     }
     return { get, clearCache: () => cache.clear() };
   }
-  scope.MetroDistance = { prepare, planRoutes, parseRoadResponse, createRoadClient };
+  scope.MetroDistance = { prepare, planRoutes, measureRoute, parseRoadResponse, createRoadClient };
 })(globalThis);
